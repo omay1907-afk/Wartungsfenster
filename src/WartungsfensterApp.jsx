@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from "react";
+import * as XLSX from "xlsx";
 import {
   Plus,
   Pencil,
@@ -11,6 +12,7 @@ import {
   Layers,
   Trash2,
   CheckCircle2,
+  Download,
 } from "lucide-react";
 
 /* ---------------------------------------------------------
@@ -51,12 +53,13 @@ const ENV_META = {
 // (stamm = Stammdaten der Servergruppe, bugfix = Daten des aktiven Wartungsfensters).
 const COLUMNS = [
   { key: "jbossAdmin", label: "JBossAdmin", group: "stamm", mono: false, colorable: true },
+  { key: "jiraKennzeichen", label: "Jira Kennzeichen", group: "stamm", mono: true, colorable: true },
   { key: "name", label: "Instanz", group: "stamm", mono: false, colorable: true },
-  { key: "server", label: "Server", group: "stamm", mono: true, colorable: true },
   { key: "bugfixNr", label: "Bugfix Nr", group: "bugfix", mono: true, colorable: true },
   { key: "properties", label: "Properties", group: "bugfix", mono: false, colorable: false },
   { key: "nexusLink", label: "Nexus Link", group: "bugfix", mono: true, colorable: true },
   { key: "bemerkung", label: "Bemerkung", group: "bugfix", mono: false, colorable: true },
+  { key: "ansprechpartner", label: "Ansprechpartner", group: "stamm", mono: false, colorable: true },
   { key: "aufrufadresse", label: "Aufrufadresse", group: "stamm", mono: true, colorable: true },
   { key: "soaEndpunkte", label: "SOA Endpunkte", group: "stamm", mono: true, colorable: true },
 ];
@@ -80,54 +83,54 @@ const VIEW_TABS = [
   { key: "eingespielt", label: "Eingespielt" },
 ];
 
-const MONTH_NAMES_DE = [
-  "Januar",
-  "Februar",
-  "März",
-  "April",
-  "Mai",
-  "Juni",
-  "Juli",
-  "August",
-  "September",
-  "Oktober",
-  "November",
-  "Dezember",
-];
-
-// Leitet aus einem Datum (yyyy-mm-dd) die Standard-Bezeichnung ab, z. B. "Wartungsfenster August 2026"
-function nameFromDate(dateStr) {
-  if (!dateStr) return "";
-  const d = new Date(`${dateStr}T00:00:00`);
-  if (isNaN(d.getTime())) return "";
-  return `Wartungsfenster ${MONTH_NAMES_DE[d.getMonth()]} ${d.getFullYear()}`;
-}
-
-// Eingetragener Bugfix (unabhängig vom Status) -> gelbe Markierung
 function hasBugfixEntry(zu) {
   return !!(zu.bugfixNr && zu.bugfixNr.trim());
 }
-// Irgendeine Einspielung vorhanden: nur Konfig, nur Deployment (Nexus Link/Bugfix) oder beides
 function hasEinspielung(zu) {
   return zu.properties === "ja" || !!(zu.nexusLink && zu.nexusLink.trim()) || hasBugfixEntry(zu);
+}
+
+function getISOWeek(dateStr) {
+  if (!dateStr) return "";
+  const date = new Date(`${dateStr}T00:00:00`);
+  if (isNaN(date.getTime())) return "";
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return String(Math.ceil(((d - yearStart) / 86400000 + 1) / 7)).padStart(2, "0");
+}
+
+function wfShortLabel(wf) {
+  return wf ? `Wartungsfenster ${wf.nummer}` : "";
+}
+function wfFullLabel(wf) {
+  return wf ? `Wartungsfenster ${wf.nummer} (${wf.datum} · KW ${wf.kw} · ${wf.atlasRelease})` : "";
 }
 
 /* ---------------------------------------------------------
    Demo-/Testdaten
 --------------------------------------------------------- */
 
-const DOMAIN_ZOLL_ATLAS_ID = "dom-zoll-atlas";
+const DOMAIN_DEFS = [
+  { id: "dom-1", name: "zoll-atlas" },
+  { id: "dom-2", name: "zoll-atlaszwei" },
+  { id: "dom-3", name: "zoll-atlasro" },
+  { id: "dom-4", name: "zoll-atlaswks" },
+  { id: "dom-5", name: "zoll-atlaseks" },
+  { id: "dom-6", name: "zoll-atlasjasperreportausfuhr" },
+  { id: "dom-7", name: "zoll-atlasjasperreport" },
+  { id: "dom-8", name: "zoll-atlasimpost" },
+  { id: "dom-9", name: "zoll-atlasbiu" },
+  { id: "dom-10", name: "zoll-atlasbiuro" },
+  { id: "dom-11", name: "zoll-atlasprobe" },
+  { id: "dom-12", name: "zoll-atlaszert" },
+];
 
 function createDomains() {
-  return [
-    { id: DOMAIN_ZOLL_ATLAS_ID, name: "zoll-atlas-*-80" },
-    { id: "dom-nord", name: "Domäne Nord" },
-    { id: "dom-sued", name: "Domäne Süd" },
-  ];
+  return DOMAIN_DEFS.map((d) => ({ ...d }));
 }
 
-// 10 Testinstanzen, alphanumerisch sortiert. Name-Spalte bewusst leer,
-// da bei diesen Testdaten nur der technische JBossAdmin-Bezeichner vorliegt.
 const TEST_INSTANCE_NAMES = [
   "aks30-std",
   "atm-std",
@@ -141,64 +144,95 @@ const TEST_INSTANCE_NAMES = [
   "wks-std",
 ];
 
-// Bei 5 von 10 Instanzen ist ein (realistischer, 1-3-stelliger, rein numerischer) Bugfix hinterlegt:
-// 2x nur Konfig, 1x nur Nexus Link (Deployment) ohne Konfig, 2x beides.
-const TEST_BUGFIX_DATA = {
-  "aks30-std": { bugfixNr: "42", properties: "ja", nexusLink: "" }, // nur Konfig
-  "atm-std": { bugfixNr: "7", properties: "ja", nexusLink: "" }, // nur Konfig
-  "bewa-std": { bugfixNr: "128", properties: "nein", nexusLink: "https://nexus.internal/repo/app-core/bewa-1.2.0" }, // nur Nexus Link
-  "eks-std": { bugfixNr: "15", properties: "ja", nexusLink: "https://nexus.internal/repo/app-core/eks-1.0.3", eingespielt: true }, // beides, zusätzlich bereits eingespielt (Demo)
-  "impost-std": { bugfixNr: "203", properties: "ja", nexusLink: "https://nexus.internal/repo/app-core/impost-2.1.0" }, // beides
+const SUBSET_IN_ALL_ENVS = ["eks-std", "riko-std"];
+
+const TEST_ARTEFAKT_VORLAGEN = {
+  "eks-std": ["eks-service-*.ear", "eks-config-*.zip"],
+  "impost-std": ["impost-app-*.war"],
 };
+
+const TEST_BUGFIX_DATA = {
+  "aks30-std": { bugfixNr: "42", properties: "ja", nexusLink: "", bemerkung: "" },
+  "atm-std": { bugfixNr: "7", properties: "ja", nexusLink: "", bemerkung: "" },
+  "bewa-std": { bugfixNr: "128", properties: "nein", nexusLink: "https://nexus.internal/repo/app-core/bewa-1.2.0", bemerkung: "" },
+  "eks-std": {
+    bugfixNr: "15",
+    properties: "ja",
+    nexusLink: "https://nexus.internal/repo/app-core/eks-1.0.3",
+    bemerkung: "Servicepatch Exportmodul",
+    eingespielt: true,
+  },
+  "impost-std": { bugfixNr: "203", properties: "ja", nexusLink: "https://nexus.internal/repo/app-core/impost-2.1.0", bemerkung: "" },
+};
+
+function makeSg(env, id, name, domainId) {
+  return {
+    id,
+    jbossAdmin: "",
+    jiraKennzeichen: "",
+    name,
+    ansprechpartner: "",
+    aufrufadresse: `https://${env.toLowerCase()}.example.local/${name}`,
+    soaEndpunkte: "",
+    artefaktVorlagen: TEST_ARTEFAKT_VORLAGEN[name] || [],
+    domainId,
+    colors: {},
+  };
+}
 
 function createServergruppen() {
   const data = {};
   ALL_ENV_KEYS.forEach((env) => {
     data[env] = [];
   });
-  data.INT = TEST_INSTANCE_NAMES.map((name, i) => ({
-    id: `INT-SG-${i + 1}`,
-    jbossAdmin: "",
-    name,
-    server: "",
-    aufrufadresse: "",
-    soaEndpunkte: "",
-    domainId: DOMAIN_ZOLL_ATLAS_ID,
-    colors: {},
-  }));
+
+  data.INT = TEST_INSTANCE_NAMES.map((name, i) => makeSg("INT", `INT-SG-${i + 1}`, name, DOMAIN_DEFS[i % DOMAIN_DEFS.length].id));
+
+  ALL_ENV_KEYS.filter((env) => env !== "INT").forEach((env, envIdx) => {
+    SUBSET_IN_ALL_ENVS.forEach((name, i) => {
+      data[env].push(makeSg(env, `${env}-SG-${name}`, name, DOMAIN_DEFS[(envIdx + i + 3) % DOMAIN_DEFS.length].id));
+    });
+  });
+
   return data;
 }
 
 function createWartungsfenster() {
-  return [
-    { id: "wf-1", name: "Wartungsfenster Juni 2026", datum: "2026-06-14" },
-    { id: "wf-2", name: "Wartungsfenster Juli 2026", datum: "2026-07-19" },
-    { id: "wf-3", name: "Wartungsfenster August 2026", datum: "2026-08-16" },
-    { id: "wf-4", name: "Wartungsfenster September 2026", datum: "2026-09-20" },
+  const defs = [
+    { datum: "2026-06-14", atlasRelease: "ATLAS 10.2.0" },
+    { datum: "2026-07-19", atlasRelease: "ATLAS 10.2.1" },
+    { datum: "2026-08-16", atlasRelease: "ATLAS 10.2.2" },
+    { datum: "2026-09-20", atlasRelease: "ATLAS 10.2.3" },
   ];
+  return defs.map((d, i) => ({
+    id: `wf-${i + 1}`,
+    nummer: String(i + 1).padStart(2, "0"),
+    datum: d.datum,
+    atlasRelease: d.atlasRelease,
+    kw: getISOWeek(d.datum),
+  }));
 }
 
-// Nur "explizite" Änderungen werden gespeichert, alles Weitere wird zur Laufzeit
-// fortgeschrieben (siehe getEffectiveZuordnung). Die Testdaten werden im ersten
-// Wartungsfenster gesetzt und gelten damit automatisch auch für die späteren.
 function createZuordnungen(servergruppen, wartungsfenster) {
   const sorted = [...wartungsfenster].sort((a, b) => a.datum.localeCompare(b.datum));
   const z = {};
   sorted.forEach((wf) => (z[wf.id] = {}));
   const firstWf = sorted[0];
-  servergruppen.INT.forEach((sg) => {
-    const bf = TEST_BUGFIX_DATA[sg.name];
-    if (bf) {
-      z[firstWf.id][sg.id] = {
-        bugfixNr: bf.bugfixNr,
-        bemerkung: "",
-        properties: bf.properties,
-        nexusLink: bf.nexusLink,
-        eingespielt: !!bf.eingespielt,
-        colors: {},
-      };
-    }
-  });
+  Object.values(servergruppen)
+    .flat()
+    .forEach((sg) => {
+      const bf = TEST_BUGFIX_DATA[sg.name];
+      if (bf) {
+        z[firstWf.id][sg.id] = {
+          bugfixNr: bf.bugfixNr,
+          bemerkung: bf.bemerkung || "",
+          properties: bf.properties,
+          nexusLink: bf.nexusLink,
+          eingespielt: !!bf.eingespielt,
+          colors: {},
+        };
+      }
+    });
   return z;
 }
 
@@ -289,6 +323,39 @@ function EnvSelect({ value, onChange }) {
   );
 }
 
+function ArtefaktVorlagenEditor({ value, onChange }) {
+  const list = value && value.length > 0 ? value : [""];
+  function updateAt(i, v) {
+    const next = [...list];
+    next[i] = v;
+    onChange(next);
+  }
+  function addRow() {
+    onChange([...list, ""]);
+  }
+  function removeRow(i) {
+    const next = list.filter((_, idx) => idx !== i);
+    onChange(next.length > 0 ? next : [""]);
+  }
+  return (
+    <div className="space-y-2">
+      {list.map((v, i) => (
+        <div key={i} className="flex gap-2">
+          <input className={inputCls} placeholder="z. B. eks-service-*.ear" value={v} onChange={(e) => updateAt(i, e.target.value)} />
+          {list.length > 1 && (
+            <button type="button" onClick={() => removeRow(i)} className="text-slate-400 hover:text-[#DC2626] px-2" title="Entfernen">
+              <X size={16} />
+            </button>
+          )}
+        </div>
+      ))}
+      <button type="button" onClick={addRow} className="text-xs text-[#0F4C5C] border border-[#0F4C5C]/30 hover:bg-[#0F4C5C]/5 px-2.5 py-1.5 rounded-md flex items-center gap-1">
+        <Plus size={13} /> Vorlage hinzufügen
+      </button>
+    </div>
+  );
+}
+
 /* ---------------------------------------------------------
    Hauptkomponente
 --------------------------------------------------------- */
@@ -317,7 +384,6 @@ export default function WartungsfensterApp() {
   const sortedWf = useMemo(() => [...wartungsfenster].sort((a, b) => a.datum.localeCompare(b.datum)), [wartungsfenster]);
   const activeWf = wartungsfenster.find((w) => w.id === activeWfId);
 
-  // Fortschreibung: die letzte explizite Änderung bis (und mit) dem Zielfenster gilt.
   function getEffectiveZuordnung(sgId, targetWfId) {
     const targetIdx = sortedWf.findIndex((w) => w.id === targetWfId);
     for (let i = targetIdx; i >= 0; i--) {
@@ -328,14 +394,29 @@ export default function WartungsfensterApp() {
     return { ...EMPTY_ZUORDNUNG, effectiveFromWf: null, explicitHere: false };
   }
 
-  function saveZuordnung(sgId, wfId, data) {
-    setZuordnungen((prev) => ({ ...prev, [wfId]: { ...(prev[wfId] || {}), [sgId]: data } }));
+  function saveZuordnungByName(sgId, wfId, data) {
+    const allSg = Object.values(servergruppen).flat();
+    const source = allSg.find((s) => s.id === sgId);
+    const targets = source && source.name && source.name.trim() ? allSg.filter((s) => s.name === source.name) : [source].filter(Boolean);
+    setZuordnungen((prev) => {
+      const next = { ...prev, [wfId]: { ...(prev[wfId] || {}) } };
+      targets.forEach((t) => {
+        next[wfId][t.id] = data;
+      });
+      return next;
+    });
   }
 
   function toggleEingespielt(sgId) {
     const current = getEffectiveZuordnung(sgId, activeWfId);
     const { effectiveFromWf, explicitHere, ...data } = current;
-    saveZuordnung(sgId, activeWfId, { ...data, eingespielt: !current.eingespielt });
+    saveZuordnungByName(sgId, activeWfId, { ...data, eingespielt: !current.eingespielt });
+  }
+
+  function updateBemerkungInline(sgId, value) {
+    const current = getEffectiveZuordnung(sgId, activeWfId);
+    const { effectiveFromWf, explicitHere, ...data } = current;
+    saveZuordnungByName(sgId, activeWfId, { ...data, bemerkung: value });
   }
 
   function saveBasis(env, updatedSg) {
@@ -363,10 +444,10 @@ export default function WartungsfensterApp() {
     });
   }
 
-  function addWartungsfenster(wf) {
+  function addWartungsfenster({ datum, atlasRelease }) {
+    const nummer = String(wartungsfenster.length + 1).padStart(2, "0");
+    const wf = { id: `wf-${Date.now()}`, nummer, datum, atlasRelease, kw: getISOWeek(datum) };
     setWartungsfenster((prev) => [...prev, wf]);
-    // Instanzen/Domänen bleiben unverändert (sind global), aber Bugfix-Einträge und
-    // "eingespielt"-Markierungen starten für ein neues Fenster immer bei Null.
     setZuordnungen((prev) => {
       const emptyForAll = {};
       Object.values(servergruppen)
@@ -411,7 +492,6 @@ export default function WartungsfensterApp() {
     return { backgroundColor: p ? p.value : "transparent" };
   }
 
-  // Header-Gruppen (Stammdaten / Bugfix) aus der Spaltenreihenfolge ableiten
   const headerGroups = [];
   COLUMNS.forEach((c) => {
     const last = headerGroups[headerGroups.length - 1];
@@ -419,7 +499,6 @@ export default function WartungsfensterApp() {
     else headerGroups.push({ group: c.group, span: 1 });
   });
 
-  // Reiter-Filter (Alle / Mit Einspielung / Eingespielt) auf Basis der aktiven Umgebung + aktiven Wartungsfensters
   const filteredRows = rows.filter((sg) => {
     const zu = getEffectiveZuordnung(sg.id, activeWfId);
     if (viewTab === "einspielung") return hasEinspielung(zu);
@@ -433,7 +512,6 @@ export default function WartungsfensterApp() {
     eingespielt: rows.filter((sg) => getEffectiveZuordnung(sg.id, activeWfId).eingespielt).length,
   };
 
-  // Gefilterte Zeilen der aktiven Umgebung nach Domäne gruppieren
   const domainGroups = useMemo(() => {
     const groups = domains.map((d) => ({ id: d.id, name: d.name, rows: filteredRows.filter((r) => r.domainId === d.id) }));
     const ohne = filteredRows.filter((r) => !r.domainId || !domains.some((d) => d.id === r.domainId));
@@ -442,9 +520,30 @@ export default function WartungsfensterApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filteredRows, domains]);
 
+  function exportToExcel() {
+    const headerRow = ["Domäne", ...COLUMNS.map((c) => c.label), "Eingespielt"];
+    const dataRows = domainGroups.flatMap((group) =>
+      group.rows.map((sg) => {
+        const zu = getEffectiveZuordnung(sg.id, activeWfId);
+        return [
+          group.name,
+          ...COLUMNS.map((c) => {
+            if (c.group === "stamm") return sg[c.key] || "";
+            if (c.key === "properties") return zu.properties === "ja" ? "JA" : "NEIN";
+            return zu[c.key] || "";
+          }),
+          zu.eingespielt ? "JA" : "NEIN",
+        ];
+      })
+    );
+    const ws = XLSX.utils.aoa_to_sheet([headerRow, ...dataRows]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, activeEnv);
+    XLSX.writeFile(wb, `Wartungsfenster_${activeEnv}_${activeWf?.nummer || ""}.xlsx`);
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-800">
-      {/* Header */}
       <header className="bg-[#0F4C5C] text-white px-6 py-4 flex items-center justify-between shadow-sm flex-wrap gap-3">
         <div className="flex items-center gap-3">
           <ServerCog size={22} />
@@ -454,6 +553,9 @@ export default function WartungsfensterApp() {
           </div>
         </div>
         <div className="flex gap-2 flex-wrap items-center">
+          <button onClick={exportToExcel} className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition">
+            <Download size={16} /> Export zu Excel
+          </button>
           <button
             onClick={() => setShowDomainModal(true)}
             className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition"
@@ -475,7 +577,6 @@ export default function WartungsfensterApp() {
         </div>
       </header>
 
-      {/* Umgebungs-Tabs + Wartungsfenster-Auswahl oben rechts */}
       <nav className="bg-white border-b border-slate-200 px-6 flex items-center justify-between flex-wrap gap-2">
         <div className="flex gap-1">
           {ENV_GROUPS.map((g) => {
@@ -502,7 +603,7 @@ export default function WartungsfensterApp() {
             <select value={activeWfId} onChange={(e) => setActiveWfId(e.target.value)} className="bg-transparent text-sm outline-none text-slate-700">
               {sortedWf.map((wf) => (
                 <option key={wf.id} value={wf.id}>
-                  {wf.name} ({wf.datum})
+                  {wfFullLabel(wf)}
                 </option>
               ))}
             </select>
@@ -536,7 +637,6 @@ export default function WartungsfensterApp() {
         </nav>
       )}
 
-      {/* Ansichts-Reiter: Alle / Mit Einspielung / Eingespielt */}
       <div className="bg-white border-b border-slate-200 px-6 flex gap-2 py-2">
         {VIEW_TABS.map((t) => {
           const active = viewTab === t.key;
@@ -562,11 +662,10 @@ export default function WartungsfensterApp() {
           <span className="font-medium text-slate-700">{activeEnv}</span> — {ENV_META[activeEnv].full}
         </p>
         <p className="text-xs text-slate-400">
-          {filteredRows.length} von {rows.length} Servergruppen/Instanzen · aktives Wartungsfenster: <span className="font-medium text-slate-600">{activeWf?.name}</span>
+          {filteredRows.length} von {rows.length} Servergruppen/Instanzen · aktives Fenster: <span className="font-medium text-slate-600">{wfFullLabel(activeWf)}</span>
         </p>
       </div>
 
-      {/* Legende */}
       <div className="px-6 pb-2 flex gap-4 text-[11px] text-slate-500">
         <span className="flex items-center gap-1.5">
           <span className="w-3 h-3 rounded-sm bg-yellow-100 border border-yellow-300 inline-block" /> Bugfix eingetragen
@@ -576,7 +675,6 @@ export default function WartungsfensterApp() {
         </span>
       </div>
 
-      {/* Tabelle, gruppiert nach Domäne */}
       <div className="px-6 pb-10 overflow-x-auto">
         <table className="w-full text-xs border-separate border-spacing-0 bg-white rounded-md shadow-sm">
           <thead>
@@ -589,7 +687,7 @@ export default function WartungsfensterApp() {
                     g.group === "bugfix" ? "bg-amber-100 text-amber-700 border-amber-200" : "bg-slate-200 text-slate-500 border-slate-300"
                   }`}
                 >
-                  {g.group === "bugfix" ? `Bugfix — ${activeWf?.name}` : "Stammdaten"}
+                  {g.group === "bugfix" ? `Bugfix — ${wfShortLabel(activeWf)}` : "Stammdaten"}
                 </th>
               ))}
               <th className="sticky top-0 bg-slate-200 border-b border-slate-300"></th>
@@ -640,6 +738,36 @@ export default function WartungsfensterApp() {
                             </td>
                           );
                         }
+                        if (c.key === "name") {
+                          const vorlagen = sg.artefaktVorlagen && sg.artefaktVorlagen.filter((v) => v && v.trim());
+                          const tooltip =
+                            vorlagen && vorlagen.length > 0
+                              ? `Artefakt-Vorlage(n):\n${vorlagen.map((v) => `• ${v}`).join("\n")}`
+                              : "Keine Artefakt-Vorlage hinterlegt";
+                          return (
+                            <td
+                              key={c.key}
+                              style={cellStyleStamm(c.key, sg)}
+                              title={tooltip}
+                              className="px-3 py-2 border-b border-slate-100 max-w-[200px] truncate cursor-help"
+                            >
+                              {sg.name || <span className="text-slate-300">—</span>}
+                            </td>
+                          );
+                        }
+                        if (c.key === "aufrufadresse") {
+                          return (
+                            <td key={c.key} style={cellStyleStamm(c.key, sg)} className="px-3 py-2 border-b border-slate-100 max-w-[200px] truncate">
+                              {sg.aufrufadresse ? (
+                                <a href={sg.aufrufadresse} target="_blank" rel="noopener noreferrer" className="text-[#0F4C5C] underline hover:text-[#0b3540]">
+                                  Link
+                                </a>
+                              ) : (
+                                <span className="text-slate-300">—</span>
+                              )}
+                            </td>
+                          );
+                        }
                         if (c.group === "stamm") {
                           return (
                             <td key={c.key} style={cellStyleStamm(c.key, sg)} className={`px-3 py-2 border-b border-slate-100 max-w-[200px] truncate ${c.mono ? "font-mono text-[11px]" : ""}`}>
@@ -647,11 +775,23 @@ export default function WartungsfensterApp() {
                             </td>
                           );
                         }
+                        if (c.key === "bemerkung") {
+                          return (
+                            <td key={c.key} style={cellStyleBugfix(c.key, zu)} className="px-1 py-1 border-b border-slate-100 max-w-[200px]">
+                              <input
+                                value={zu.bemerkung}
+                                onChange={(e) => updateBemerkungInline(sg.id, e.target.value)}
+                                placeholder="Bemerkung eintragen…"
+                                className="w-full bg-transparent px-2 py-1.5 text-xs rounded-md outline-none hover:bg-slate-100/70 focus:bg-white focus:ring-1 focus:ring-[#0F4C5C]"
+                              />
+                            </td>
+                          );
+                        }
                         return (
                           <td
                             key={c.key}
                             style={cellStyleBugfix(c.key, zu)}
-                            title={zu.effectiveFromWf && !zu.explicitHere ? `Übernommen aus ${zu.effectiveFromWf.name}` : undefined}
+                            title={zu.effectiveFromWf && !zu.explicitHere ? `Übernommen aus ${wfShortLabel(zu.effectiveFromWf)}` : undefined}
                             className={`px-3 py-2 border-b border-slate-100 max-w-[200px] truncate ${c.mono ? "font-mono text-[11px]" : ""}`}
                           >
                             {c.key === "properties" ? (zu.properties === "ja" ? "JA" : "NEIN") : zu[c.key] || <span className="text-slate-300">—</span>}
@@ -715,7 +855,7 @@ export default function WartungsfensterApp() {
           initial={getEffectiveZuordnung(editZuordnung.sg.id, activeWfId)}
           onClose={() => setEditZuordnung(null)}
           onSave={(data) => {
-            saveZuordnung(editZuordnung.sg.id, activeWfId, data);
+            saveZuordnungByName(editZuordnung.sg.id, activeWfId, data);
             setEditZuordnung(null);
           }}
         />
@@ -758,7 +898,7 @@ export default function WartungsfensterApp() {
           wf={activeWf}
           onClose={() => setShowBugfixModal(false)}
           onSubmit={(sgId, data) => {
-            saveZuordnung(sgId, activeWfId, data);
+            saveZuordnungByName(sgId, activeWfId, data);
             setShowBugfixModal(false);
           }}
         />
@@ -766,9 +906,10 @@ export default function WartungsfensterApp() {
 
       {showNewWfModal && (
         <NewWartungsfensterModal
+          nextNummer={String(wartungsfenster.length + 1).padStart(2, "0")}
           onClose={() => setShowNewWfModal(false)}
-          onSubmit={(wf) => {
-            addWartungsfenster(wf);
+          onSubmit={(data) => {
+            addWartungsfenster(data);
             setShowNewWfModal(false);
           }}
         />
@@ -796,7 +937,15 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
   const [selectedEnvs, setSelectedEnvs] = useState(() => new Set([defaultEnv]));
   const [domainId, setDomainId] = useState(null);
   const [newDomainName, setNewDomainName] = useState("");
-  const [form, setForm] = useState({ jbossAdmin: "", name: "", server: "", aufrufadresse: "", soaEndpunkte: "" });
+  const [form, setForm] = useState({
+    jbossAdmin: "",
+    jiraKennzeichen: "",
+    name: "",
+    ansprechpartner: "",
+    aufrufadresse: "",
+    soaEndpunkte: "",
+    artefaktVorlagen: [""],
+  });
 
   function set(key, val) {
     setForm((f) => ({ ...f, [key]: val }));
@@ -817,7 +966,7 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
   function handleSubmit(e) {
     e.preventDefault();
     if (selectedEnvs.size === 0) return;
-    onSubmit(Array.from(selectedEnvs), { ...form, domainId });
+    onSubmit(Array.from(selectedEnvs), { ...form, artefaktVorlagen: form.artefaktVorlagen.filter((v) => v && v.trim()), domainId });
   }
 
   return (
@@ -890,17 +1039,27 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
           </div>
         </Field>
 
+        <Field label="JBossAdmin">
+          <input className={inputCls} value={form.jbossAdmin} onChange={(e) => set("jbossAdmin", e.target.value)} />
+        </Field>
+        <Field label="Jira Kennzeichen">
+          <input className={inputCls} value={form.jiraKennzeichen} onChange={(e) => set("jiraKennzeichen", e.target.value)} />
+        </Field>
         <Field label="Instanz">
           <input className={inputCls} value={form.name} onChange={(e) => set("name", e.target.value)} />
         </Field>
-        <Field label="Server">
-          <input className={inputCls} value={form.server} onChange={(e) => set("server", e.target.value)} />
+        <Field label="Ansprechpartner">
+          <input className={inputCls} value={form.ansprechpartner} onChange={(e) => set("ansprechpartner", e.target.value)} />
         </Field>
         <Field label="Aufrufadresse">
           <input className={inputCls} value={form.aufrufadresse} onChange={(e) => set("aufrufadresse", e.target.value)} />
         </Field>
         <Field label="SOA Endpunkte">
           <input className={inputCls} value={form.soaEndpunkte} onChange={(e) => set("soaEndpunkte", e.target.value)} />
+        </Field>
+        <Field label="Artefakt-Namensvorlage(n)">
+          <ArtefaktVorlagenEditor value={form.artefaktVorlagen} onChange={(v) => set("artefaktVorlagen", v)} />
+          <p className="text-xs text-slate-400 mt-1">Wird als Mouseover-Hinweis auf der Instanz-Spalte angezeigt.</p>
         </Field>
 
         <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
@@ -921,7 +1080,7 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
 --------------------------------------------------------- */
 
 function BasisModal({ env, sg, domains, onClose, onSave }) {
-  const [form, setForm] = useState({ ...sg, colors: { ...sg.colors } });
+  const [form, setForm] = useState({ ...sg, colors: { ...sg.colors }, artefaktVorlagen: sg.artefaktVorlagen && sg.artefaktVorlagen.length > 0 ? sg.artefaktVorlagen : [""] });
 
   function set(key, val) {
     setForm((f) => ({ ...f, [key]: val }));
@@ -935,7 +1094,7 @@ function BasisModal({ env, sg, domains, onClose, onSave }) {
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          onSave(form);
+          onSave({ ...form, artefaktVorlagen: form.artefaktVorlagen.filter((v) => v && v.trim()) });
         }}
       >
         <Field label="Domäne">
@@ -949,6 +1108,9 @@ function BasisModal({ env, sg, domains, onClose, onSave }) {
             </div>
           </Field>
         ))}
+        <Field label="Artefakt-Namensvorlage(n)">
+          <ArtefaktVorlagenEditor value={form.artefaktVorlagen} onChange={(v) => set("artefaktVorlagen", v)} />
+        </Field>
         <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
           <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
             Abbrechen
@@ -984,7 +1146,7 @@ function ZuordnungModal({ sg, wf, initial, onClose, onSave }) {
   }
 
   return (
-    <Modal title={`Bugfix bearbeiten — ${sg.name || sg.jbossAdmin || sg.id} · ${wf?.name}`} onClose={onClose}>
+    <Modal title={`Bugfix bearbeiten — ${sg.name || sg.jbossAdmin || sg.id} · ${wfShortLabel(wf)}`} onClose={onClose}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -992,7 +1154,8 @@ function ZuordnungModal({ sg, wf, initial, onClose, onSave }) {
         }}
       >
         <p className="text-xs text-slate-500 mb-4 bg-slate-50 border border-slate-200 rounded-md px-3 py-2">
-          Diese Änderung gilt ab <strong>{wf?.name}</strong> ({wf?.datum}) und automatisch für alle späteren Wartungsfenster, bis sie dort erneut geändert wird.
+          Diese Änderung gilt ab <strong>{wfShortLabel(wf)}</strong> ({wf?.datum}) für alle Instanzen mit demselben Instanznamen in jeder Umgebung — und automatisch für alle
+          späteren Wartungsfenster, bis sie dort erneut geändert wird.
         </p>
         {COLUMNS.filter((c) => c.group === "bugfix" && c.key !== "properties").map((c) => (
           <Field key={c.key} label={c.label}>
@@ -1055,7 +1218,7 @@ function BugfixQuickModal({ defaultEnv, servergruppen, wf, onClose, onSubmit }) 
   }
 
   return (
-    <Modal title={`Bugfix erfassen — ${wf?.name}`} onClose={onClose}>
+    <Modal title={`Bugfix erfassen — ${wfShortLabel(wf)}`} onClose={onClose}>
       <form onSubmit={handleSubmit}>
         <Field label="Umgebung">
           <EnvSelect
@@ -1072,7 +1235,6 @@ function BugfixQuickModal({ defaultEnv, servergruppen, wf, onClose, onSubmit }) 
               <option key={sg.id} value={sg.id}>
                 {sg.name || sg.jbossAdmin || sg.id}
                 {sg.name && sg.jbossAdmin ? ` — ${sg.jbossAdmin}` : ""}
-                {sg.server ? ` (${sg.server})` : ""}
               </option>
             ))}
             {options.length === 0 && <option value="">Keine Servergruppen in dieser Umgebung</option>}
@@ -1100,7 +1262,9 @@ function BugfixQuickModal({ defaultEnv, servergruppen, wf, onClose, onSubmit }) 
           </div>
           {form.properties === "ja" && <p className="text-xs text-[#DC2626] mt-1">Die Spalte "Properties" wird rot markiert.</p>}
         </Field>
-        <p className="text-xs text-slate-400 mb-3">Gilt ab dem aktuell gewählten Wartungsfenster und automatisch für alle folgenden. Die Zeile wird gelb markiert, bis sie als "eingespielt" bestätigt wird.</p>
+        <p className="text-xs text-slate-400 mb-3">
+          Gilt für alle Instanzen mit diesem Instanznamen (in jeder Umgebung), ab dem aktuell gewählten Wartungsfenster und automatisch für alle folgenden.
+        </p>
         <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
           <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
             Abbrechen
@@ -1118,34 +1282,29 @@ function BugfixQuickModal({ defaultEnv, servergruppen, wf, onClose, onSubmit }) 
    Modal: Neues Wartungsfenster
 --------------------------------------------------------- */
 
-function NewWartungsfensterModal({ onClose, onSubmit }) {
-  const [name, setName] = useState("");
+function NewWartungsfensterModal({ nextNummer, onClose, onSubmit }) {
   const [datum, setDatum] = useState("");
-  const [nameTouched, setNameTouched] = useState(false);
-
-  function handleDatumChange(v) {
-    setDatum(v);
-    if (!nameTouched) setName(nameFromDate(v));
-  }
-  function handleNameChange(v) {
-    setName(v);
-    setNameTouched(true);
-  }
+  const [atlasRelease, setAtlasRelease] = useState("ATLAS 10.2.2");
 
   function handleSubmit(e) {
     e.preventDefault();
-    onSubmit({ id: `wf-${Date.now()}`, name, datum });
+    onSubmit({ datum, atlasRelease });
   }
+
+  const kw = getISOWeek(datum);
 
   return (
     <Modal title="Neues Wartungsfenster anlegen" onClose={onClose}>
       <form onSubmit={handleSubmit}>
+        <p className="text-xs text-slate-500 mb-4 bg-slate-50 border border-slate-200 rounded-md px-3 py-2">
+          Wird angelegt als: <strong>Wartungsfenster {nextNummer}</strong>
+          {datum ? ` (${datum} · KW ${kw} · ${atlasRelease})` : ""}. Die Nummer wird automatisch vergeben.
+        </p>
         <Field label="Datum">
-          <input required type="date" className={inputCls} value={datum} onChange={(e) => handleDatumChange(e.target.value)} />
+          <input required type="date" className={inputCls} value={datum} onChange={(e) => setDatum(e.target.value)} />
         </Field>
-        <Field label="Bezeichnung">
-          <input required className={inputCls} placeholder="z. B. Wartungsfenster Oktober 2026" value={name} onChange={(e) => handleNameChange(e.target.value)} />
-          <p className="text-xs text-slate-400 mt-1">Wird aus dem Datum vorgeschlagen, lässt sich aber jederzeit anpassen.</p>
+        <Field label="ATLAS Release">
+          <input required className={inputCls} value={atlasRelease} onChange={(e) => setAtlasRelease(e.target.value)} />
         </Field>
         <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
           <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
@@ -1195,7 +1354,7 @@ function DomainManagerModal({ domains, servergruppen, onAdd, onRename, onDelete,
   return (
     <Modal title="Domänen verwalten" onClose={onClose}>
       <form onSubmit={handleAdd} className="flex gap-2 mb-4">
-        <input className={inputCls} placeholder="Neue Domäne, z. B. Domäne West" value={newName} onChange={(e) => setNewName(e.target.value)} />
+        <input className={inputCls} placeholder="Neue Domäne, z. B. zoll-atlasneu" value={newName} onChange={(e) => setNewName(e.target.value)} />
         <button type="submit" className="px-3 py-2 text-sm bg-[#0F4C5C] text-white rounded-md hover:brightness-110 whitespace-nowrap flex items-center gap-1">
           <Plus size={14} /> Anlegen
         </button>
@@ -1248,12 +1407,14 @@ function HistoryModal({ sg, sortedWf, getEffectiveZuordnung, onClose }) {
   const hasAny = rows.some((wf) => getEffectiveZuordnung(sg.id, wf.id).effectiveFromWf);
 
   return (
-    <Modal title={`Verlauf — ${sg.name || sg.jbossAdmin || sg.id} (${sg.server || "kein Server hinterlegt"})`} onClose={onClose} wide>
+    <Modal title={`Verlauf — ${sg.name || sg.jbossAdmin || sg.id}`} onClose={onClose} wide>
       <table className="w-full text-xs border-collapse">
         <thead>
           <tr className="text-left text-slate-500 border-b border-slate-200">
             <th className="py-2 pr-3">Wartungsfenster</th>
             <th className="py-2 pr-3">Datum</th>
+            <th className="py-2 pr-3">KW</th>
+            <th className="py-2 pr-3">ATLAS Release</th>
             <th className="py-2 pr-3">Bugfix Nr</th>
             <th className="py-2 pr-3">Properties</th>
             <th className="py-2 pr-3">Nexus Link</th>
@@ -1266,8 +1427,10 @@ function HistoryModal({ sg, sortedWf, getEffectiveZuordnung, onClose }) {
             const zu = getEffectiveZuordnung(sg.id, wf.id);
             return (
               <tr key={wf.id} className="border-b border-slate-100">
-                <td className="py-2 pr-3 font-medium text-slate-700">{wf.name}</td>
+                <td className="py-2 pr-3 font-medium text-slate-700">{wfShortLabel(wf)}</td>
                 <td className="py-2 pr-3 font-mono">{wf.datum}</td>
+                <td className="py-2 pr-3 font-mono">{wf.kw}</td>
+                <td className="py-2 pr-3">{wf.atlasRelease}</td>
                 <td className="py-2 pr-3 font-mono">{zu.bugfixNr || <span className="text-slate-300">—</span>}</td>
                 <td className="py-2 pr-3">
                   {zu.effectiveFromWf ? (
@@ -1286,7 +1449,7 @@ function HistoryModal({ sg, sortedWf, getEffectiveZuordnung, onClose }) {
                   ) : (
                     <>
                       {zu.eingespielt && <span className="text-green-600 font-medium mr-1">eingespielt</span>}
-                      {zu.explicitHere ? <span className="text-slate-600">geändert</span> : <span className="text-slate-400">übernommen seit {zu.effectiveFromWf.name}</span>}
+                      {zu.explicitHere ? <span className="text-slate-600">geändert</span> : <span className="text-slate-400">übernommen seit {wfShortLabel(zu.effectiveFromWf)}</span>}
                     </>
                   )}
                 </td>
