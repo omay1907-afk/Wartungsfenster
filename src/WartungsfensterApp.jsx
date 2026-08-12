@@ -52,12 +52,12 @@ const ENV_META = {
 // Spaltenreihenfolge. "group" steuert die farbliche Kopfzeile
 // (stamm = Stammdaten der Servergruppe, bugfix = Daten des aktiven Wartungsfensters).
 const COLUMNS = [
-  { key: "jbossAdmin", label: "JBossAdmin", group: "stamm", mono: false, colorable: true },
+  { key: "jbossAdmin", label: "JBossAdmin", group: "stamm", mono: false, colorable: true, width: "max-w-[110px]" },
   { key: "jiraKennzeichen", label: "Jira Kennzeichen", group: "stamm", mono: true, colorable: true },
   { key: "name", label: "Instanz", group: "stamm", mono: false, colorable: true },
   { key: "bugfixNr", label: "Bugfix Nr", group: "bugfix", mono: true, colorable: true },
   { key: "properties", label: "Properties", group: "bugfix", mono: false, colorable: false },
-  { key: "nexusLink", label: "Nexus Link", group: "bugfix", mono: true, colorable: true },
+  { key: "nexusLink", label: "Nexus Link", group: "bugfix", mono: true, colorable: true, width: "max-w-[300px]" },
   { key: "bemerkung", label: "Bemerkung", group: "bugfix", mono: false, colorable: true },
   { key: "ansprechpartner", label: "Ansprechpartner", group: "stamm", mono: false, colorable: true },
   { key: "aufrufadresse", label: "Aufrufadresse", group: "stamm", mono: true, colorable: true },
@@ -146,9 +146,33 @@ const TEST_INSTANCE_NAMES = [
 
 const SUBSET_IN_ALL_ENVS = ["eks-std", "riko-std"];
 
+// Demo-Instanzen werden nur auf diese 3 Domänen verteilt (die restlichen 9
+// Musterdomänen bleiben trotzdem über "Domänen verwalten" wählbar).
+const DEMO_DOMAIN_IDS = [DOMAIN_DEFS[0].id, DOMAIN_DEFS[1].id, DOMAIN_DEFS[2].id];
+
+// Zusätzlich zu eks-std/riko-std (die in jeder Umgebung vorkommen) landet je
+// Umgebung eine unterschiedliche, zufällig variierende Teilmenge der übrigen
+// 8 Testinstanzen — Anzahl und Auswahl unterscheiden sich bewusst je Umgebung.
+const EXTRA_INSTANCES_BY_ENV = {
+  REFBIU: ["bewa-std", "impost-std"],
+  REFPROBE: ["aks30-std"],
+  REFZERT: ["atm-std", "jasper-std", "wks-std"],
+  ABN: ["stdservice-std"],
+  EDU: ["phonetik-std"],
+  PRD: ["aks30-std", "atm-std", "bewa-std", "impost-std", "jasper-std"],
+};
+
 const TEST_ARTEFAKT_VORLAGEN = {
   "eks-std": ["eks-service-*.ear", "eks-config-*.zip"],
   "impost-std": ["impost-app-*.war"],
+};
+
+const TEST_ANSPRECHPARTNER = {
+  "aks30-std": "Max Mustermann",
+  "eks-std": "Erika Mustermann",
+  "impost-std": "Max Mustermann",
+  "riko-std": "Erika Mustermann",
+  "wks-std": "Max Mustermann",
 };
 
 const TEST_BUGFIX_DATA = {
@@ -171,8 +195,7 @@ function makeSg(env, id, name, domainId) {
     jbossAdmin: "",
     jiraKennzeichen: "",
     name,
-    ansprechpartner: "",
-    aufrufadresse: `https://${env.toLowerCase()}.example.local/${name}`,
+    ansprechpartner: TEST_ANSPRECHPARTNER[name] || "",
     soaEndpunkte: "",
     artefaktVorlagen: TEST_ARTEFAKT_VORLAGEN[name] || [],
     domainId,
@@ -186,11 +209,12 @@ function createServergruppen() {
     data[env] = [];
   });
 
-  data.INT = TEST_INSTANCE_NAMES.map((name, i) => makeSg("INT", `INT-SG-${i + 1}`, name, DOMAIN_DEFS[i % DOMAIN_DEFS.length].id));
+  data.INT = TEST_INSTANCE_NAMES.map((name, i) => makeSg("INT", `INT-SG-${i + 1}`, name, DEMO_DOMAIN_IDS[i % DEMO_DOMAIN_IDS.length]));
 
   ALL_ENV_KEYS.filter((env) => env !== "INT").forEach((env, envIdx) => {
-    SUBSET_IN_ALL_ENVS.forEach((name, i) => {
-      data[env].push(makeSg(env, `${env}-SG-${name}`, name, DOMAIN_DEFS[(envIdx + i + 3) % DOMAIN_DEFS.length].id));
+    const names = [...SUBSET_IN_ALL_ENVS, ...(EXTRA_INSTANCES_BY_ENV[env] || [])];
+    names.forEach((name, i) => {
+      data[env].push(makeSg(env, `${env}-SG-${name}`, name, DEMO_DOMAIN_IDS[(envIdx + i) % DEMO_DOMAIN_IDS.length]));
     });
   });
 
@@ -728,7 +752,7 @@ export default function WartungsfensterApp() {
                       {COLUMNS.map((c) => {
                         if (c.key === "jbossAdmin") {
                           return (
-                            <td key={c.key} style={cellStyleStamm(c.key, sg)} className="px-1 py-1 border-b border-slate-100 max-w-[200px]">
+                            <td key={c.key} style={cellStyleStamm(c.key, sg)} className={`px-1 py-1 border-b border-slate-100 ${c.width || "max-w-[200px]"}`}>
                               <input
                                 value={sg.jbossAdmin}
                                 onChange={(e) => updateBasisField(activeEnv, sg.id, "jbossAdmin", e.target.value)}
@@ -770,7 +794,7 @@ export default function WartungsfensterApp() {
                         }
                         if (c.group === "stamm") {
                           return (
-                            <td key={c.key} style={cellStyleStamm(c.key, sg)} className={`px-3 py-2 border-b border-slate-100 max-w-[200px] truncate ${c.mono ? "font-mono text-[11px]" : ""}`}>
+                            <td key={c.key} style={cellStyleStamm(c.key, sg)} className={`px-3 py-2 border-b border-slate-100 ${c.width || "max-w-[200px]"} truncate ${c.mono ? "font-mono text-[11px]" : ""}`}>
                               {sg[c.key] || <span className="text-slate-300">—</span>}
                             </td>
                           );
@@ -792,7 +816,7 @@ export default function WartungsfensterApp() {
                             key={c.key}
                             style={cellStyleBugfix(c.key, zu)}
                             title={zu.effectiveFromWf && !zu.explicitHere ? `Übernommen aus ${wfShortLabel(zu.effectiveFromWf)}` : undefined}
-                            className={`px-3 py-2 border-b border-slate-100 max-w-[200px] truncate ${c.mono ? "font-mono text-[11px]" : ""}`}
+                            className={`px-3 py-2 border-b border-slate-100 ${c.width || "max-w-[200px]"} truncate ${c.mono ? "font-mono text-[11px]" : ""}`}
                           >
                             {c.key === "properties" ? (zu.properties === "ja" ? "JA" : "NEIN") : zu[c.key] || <span className="text-slate-300">—</span>}
                           </td>
@@ -1039,14 +1063,15 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
           </div>
         </Field>
 
-        <Field label="JBossAdmin">
-          <input className={inputCls} value={form.jbossAdmin} onChange={(e) => set("jbossAdmin", e.target.value)} />
-        </Field>
         <Field label="Jira Kennzeichen">
           <input className={inputCls} value={form.jiraKennzeichen} onChange={(e) => set("jiraKennzeichen", e.target.value)} />
         </Field>
         <Field label="Instanz">
           <input className={inputCls} value={form.name} onChange={(e) => set("name", e.target.value)} />
+        </Field>
+        <Field label="Artefakt-Namensvorlage(n)">
+          <ArtefaktVorlagenEditor value={form.artefaktVorlagen} onChange={(v) => set("artefaktVorlagen", v)} />
+          <p className="text-xs text-slate-400 mt-1">Wird als Mouseover-Hinweis auf der Instanz-Spalte angezeigt.</p>
         </Field>
         <Field label="Ansprechpartner">
           <input className={inputCls} value={form.ansprechpartner} onChange={(e) => set("ansprechpartner", e.target.value)} />
@@ -1056,10 +1081,6 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
         </Field>
         <Field label="SOA Endpunkte">
           <input className={inputCls} value={form.soaEndpunkte} onChange={(e) => set("soaEndpunkte", e.target.value)} />
-        </Field>
-        <Field label="Artefakt-Namensvorlage(n)">
-          <ArtefaktVorlagenEditor value={form.artefaktVorlagen} onChange={(v) => set("artefaktVorlagen", v)} />
-          <p className="text-xs text-slate-400 mt-1">Wird als Mouseover-Hinweis auf der Instanz-Spalte angezeigt.</p>
         </Field>
 
         <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
@@ -1101,16 +1122,20 @@ function BasisModal({ env, sg, domains, onClose, onSave }) {
           <DomainSelect domains={domains} value={form.domainId} onChange={(v) => set("domainId", v)} />
         </Field>
         {COLUMNS.filter((c) => c.group === "stamm").map((c) => (
-          <Field key={c.key} label={c.label}>
-            <div className="flex gap-2 items-center">
-              <input className={inputCls} value={form[c.key] || ""} onChange={(e) => set(c.key, e.target.value)} />
-              <ColorPicker value={form.colors?.[c.key]} onChange={(v) => setColor(c.key, v)} />
-            </div>
-          </Field>
+          <React.Fragment key={c.key}>
+            <Field label={c.label}>
+              <div className="flex gap-2 items-center">
+                <input className={inputCls} value={form[c.key] || ""} onChange={(e) => set(c.key, e.target.value)} />
+                <ColorPicker value={form.colors?.[c.key]} onChange={(v) => setColor(c.key, v)} />
+              </div>
+            </Field>
+            {c.key === "name" && (
+              <Field label="Artefakt-Namensvorlage(n)">
+                <ArtefaktVorlagenEditor value={form.artefaktVorlagen} onChange={(v) => set("artefaktVorlagen", v)} />
+              </Field>
+            )}
+          </React.Fragment>
         ))}
-        <Field label="Artefakt-Namensvorlage(n)">
-          <ArtefaktVorlagenEditor value={form.artefaktVorlagen} onChange={(v) => set("artefaktVorlagen", v)} />
-        </Field>
         <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
           <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
             Abbrechen
