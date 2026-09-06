@@ -13,6 +13,9 @@ import {
   Trash2,
   CheckCircle2,
   Download,
+  ArrowRightCircle,
+  Archive,
+  Search,
 } from "lucide-react";
 
 /* ---------------------------------------------------------
@@ -267,6 +270,19 @@ function getDefaultWfId(list) {
   return (upcoming || sorted[sorted.length - 1])?.id;
 }
 
+// Nur die letzten 2 vergangenen Wartungsfenster + alle aktuellen/zukünftigen
+// werden standardmäßig angezeigt. Ältere wandern ins Archiv.
+function splitWfVisibility(list) {
+  const today = new Date().toISOString().slice(0, 10);
+  const sorted = [...list].sort((a, b) => a.datum.localeCompare(b.datum));
+  const past = sorted.filter((w) => w.datum < today);
+  const future = sorted.filter((w) => w.datum >= today);
+  const recentPast = past.slice(-2);
+  const archived = past.slice(0, Math.max(0, past.length - 2));
+  const visible = [...recentPast, ...future].sort((a, b) => a.datum.localeCompare(b.datum));
+  return { visible, archived };
+}
+
 /* ---------------------------------------------------------
    Kleine UI-Bausteine
 --------------------------------------------------------- */
@@ -394,6 +410,7 @@ export default function WartungsfensterApp() {
   const [activeGroup, setActiveGroup] = useState("INT");
   const [activeSub, setActiveSub] = useState("REFBIU");
   const [viewTab, setViewTab] = useState("alle");
+  const [columnFilters, setColumnFilters] = useState({});
 
   const [editZuordnung, setEditZuordnung] = useState(null);
   const [editBasis, setEditBasis] = useState(null);
@@ -402,11 +419,19 @@ export default function WartungsfensterApp() {
   const [showBugfixModal, setShowBugfixModal] = useState(false);
   const [showNewWfModal, setShowNewWfModal] = useState(false);
   const [showDomainModal, setShowDomainModal] = useState(false);
+  const [showArchiveModal, setShowArchiveModal] = useState(false);
 
   const activeEnv = activeGroup === "REF" ? activeSub : activeGroup;
   const rows = servergruppen[activeEnv] || [];
   const sortedWf = useMemo(() => [...wartungsfenster].sort((a, b) => a.datum.localeCompare(b.datum)), [wartungsfenster]);
   const activeWf = wartungsfenster.find((w) => w.id === activeWfId);
+  const { visible: visibleWf, archived: archivedWf } = useMemo(() => splitWfVisibility(wartungsfenster), [wartungsfenster]);
+  // Falls das aktive Fenster archiviert ist (z. B. gezielt aus dem Archiv geöffnet), trotzdem im Dropdown anzeigen.
+  const dropdownWf = visibleWf.some((w) => w.id === activeWfId) || !activeWf ? visibleWf : [...visibleWf, activeWf].sort((a, b) => a.datum.localeCompare(b.datum));
+  const nextWf = (() => {
+    const idx = sortedWf.findIndex((w) => w.id === activeWfId);
+    return idx >= 0 ? sortedWf[idx + 1] : undefined;
+  })();
 
   function getEffectiveZuordnung(sgId, targetWfId) {
     const targetIdx = sortedWf.findIndex((w) => w.id === targetWfId);
@@ -433,8 +458,20 @@ export default function WartungsfensterApp() {
 
   function toggleEingespielt(sgId) {
     const current = getEffectiveZuordnung(sgId, activeWfId);
+    const msg = current.eingespielt ? "Markierung 'eingespielt' wirklich entfernen?" : "Wurde dieser Bugfix wirklich eingespielt?";
+    if (!window.confirm(msg)) return;
     const { effectiveFromWf, explicitHere, ...data } = current;
     saveZuordnungByName(sgId, activeWfId, { ...data, eingespielt: !current.eingespielt });
+  }
+
+  // Überträgt die aktuelle Bugfix-Zuordnung explizit in das nächste (chronologisch
+  // folgende) Wartungsfenster — z. B. wenn ein Bugfix in diesem Fenster nicht mehr
+  // eingespielt wurde und ins nächste Fenster verschoben werden soll.
+  function transferToNextWindow(sgId) {
+    if (!nextWf) return;
+    const current = getEffectiveZuordnung(sgId, activeWfId);
+    const { effectiveFromWf, explicitHere, ...data } = current;
+    saveZuordnungByName(sgId, nextWf.id, data);
   }
 
   function updateBemerkungInline(sgId, value) {
@@ -523,11 +560,23 @@ export default function WartungsfensterApp() {
     else headerGroups.push({ group: c.group, span: 1 });
   });
 
+  function columnValue(c, sg, zu) {
+    if (c.group === "stamm") return sg[c.key] || "";
+    if (c.key === "properties") return zu.properties === "ja" ? "JA" : "NEIN";
+    return zu[c.key] || "";
+  }
+
+  const activeFilterCount = Object.values(columnFilters).filter((v) => v && v.trim()).length;
+
   const filteredRows = rows.filter((sg) => {
     const zu = getEffectiveZuordnung(sg.id, activeWfId);
-    if (viewTab === "einspielung") return hasEinspielung(zu);
-    if (viewTab === "eingespielt") return zu.eingespielt;
-    return true;
+    if (viewTab === "einspielung" && !hasEinspielung(zu)) return false;
+    if (viewTab === "eingespielt" && !zu.eingespielt) return false;
+    return COLUMNS.every((c) => {
+      const f = columnFilters[c.key];
+      if (!f || !f.trim()) return true;
+      return String(columnValue(c, sg, zu)).toLowerCase().includes(f.trim().toLowerCase());
+    });
   });
 
   const counts = {
@@ -625,7 +674,7 @@ export default function WartungsfensterApp() {
           <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5">
             <CalendarClock size={15} className="text-slate-500" />
             <select value={activeWfId} onChange={(e) => setActiveWfId(e.target.value)} className="bg-transparent text-sm outline-none text-slate-700">
-              {sortedWf.map((wf) => (
+              {dropdownWf.map((wf) => (
                 <option key={wf.id} value={wf.id}>
                   {wfFullLabel(wf)}
                 </option>
@@ -638,6 +687,15 @@ export default function WartungsfensterApp() {
           >
             <Plus size={13} /> Wartungsfenster
           </button>
+          {archivedWf.length > 0 && (
+            <button
+              onClick={() => setShowArchiveModal(true)}
+              className="text-xs text-slate-500 border border-slate-300 hover:bg-slate-50 px-2 py-1.5 rounded-md flex items-center gap-1 transition"
+              title="Ältere Wartungsfenster ansehen"
+            >
+              <Archive size={13} /> Archiv ({archivedWf.length})
+            </button>
+          )}
         </div>
       </nav>
 
@@ -727,7 +785,29 @@ export default function WartungsfensterApp() {
                   {c.label}
                 </th>
               ))}
-              <th className="sticky top-0 bg-slate-100 px-3 py-2 border-b border-slate-200 text-center w-40">Aktionen</th>
+              <th className="sticky top-0 bg-slate-100 px-3 py-2 border-b border-slate-200 text-center w-48">Aktionen</th>
+            </tr>
+            <tr>
+              {COLUMNS.map((c) => (
+                <th key={c.key} className={`sticky top-0 px-1.5 py-1.5 border-b border-slate-200 ${c.group === "bugfix" ? "bg-amber-50/60" : "bg-slate-50"}`}>
+                  <div className="relative">
+                    <Search size={11} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" />
+                    <input
+                      value={columnFilters[c.key] || ""}
+                      onChange={(e) => setColumnFilters((f) => ({ ...f, [c.key]: e.target.value }))}
+                      placeholder="Filtern…"
+                      className="w-full text-[11px] font-normal pl-5 pr-1.5 py-1 rounded border border-slate-200 bg-white outline-none focus:ring-1 focus:ring-[#0F4C5C]"
+                    />
+                  </div>
+                </th>
+              ))}
+              <th className="sticky top-0 bg-slate-50 px-2 py-1.5 border-b border-slate-200 text-center">
+                {activeFilterCount > 0 && (
+                  <button onClick={() => setColumnFilters({})} className="text-[10px] text-[#0F4C5C] underline whitespace-nowrap">
+                    Filter ({activeFilterCount}) zurücksetzen
+                  </button>
+                )}
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -832,6 +912,20 @@ export default function WartungsfensterApp() {
                           </button>
                           <button onClick={() => setEditBasis({ env: activeEnv, sg })} title="Stammdaten bearbeiten" className="text-slate-400 hover:text-[#0F4C5C] transition">
                             <Settings2 size={14} />
+                          </button>
+                          <button
+                            onClick={() => transferToNextWindow(sg.id)}
+                            disabled={!hasBugfixEntry(zu) || !nextWf}
+                            title={
+                              !hasBugfixEntry(zu)
+                                ? "Kein Bugfix zum Übertragen vorhanden"
+                                : !nextWf
+                                ? "Kein nächstes Wartungsfenster vorhanden"
+                                : `In ${wfShortLabel(nextWf)} übertragen`
+                            }
+                            className={`transition ${!hasBugfixEntry(zu) || !nextWf ? "text-slate-200 cursor-not-allowed" : "text-slate-400 hover:text-[#0F4C5C]"}`}
+                          >
+                            <ArrowRightCircle size={14} />
                           </button>
                           <button
                             onClick={() => toggleEingespielt(sg.id)}
@@ -947,6 +1041,17 @@ export default function WartungsfensterApp() {
           onRename={renameDomain}
           onDelete={deleteDomain}
           onClose={() => setShowDomainModal(false)}
+        />
+      )}
+
+      {showArchiveModal && (
+        <ArchiveModal
+          archivedWf={archivedWf}
+          onSelect={(id) => {
+            setActiveWfId(id);
+            setShowArchiveModal(false);
+          }}
+          onClose={() => setShowArchiveModal(false)}
         />
       )}
     </div>
@@ -1426,6 +1531,34 @@ function DomainManagerModal({ domains, servergruppen, onAdd, onRename, onDelete,
 /* ---------------------------------------------------------
    Modal: Verlauf (fortgeschriebene Werte je Wartungsfenster)
 --------------------------------------------------------- */
+
+/* ---------------------------------------------------------
+   Modal: Wartungsfenster-Archiv (ältere Fenster, nicht mehr im Standard-Dropdown)
+--------------------------------------------------------- */
+
+function ArchiveModal({ archivedWf, onSelect, onClose }) {
+  const rows = [...archivedWf].sort((a, b) => b.datum.localeCompare(a.datum));
+  return (
+    <Modal title="Wartungsfenster-Archiv" onClose={onClose}>
+      <p className="text-xs text-slate-500 mb-4">
+        Diese Wartungsfenster liegen weiter als die letzten 2 vergangenen zurück und werden im normalen Auswahlfeld nicht mehr angezeigt. Zum Ansehen einfach anklicken.
+      </p>
+      <div className="border border-slate-200 rounded-md divide-y divide-slate-100">
+        {rows.map((wf) => (
+          <button key={wf.id} onClick={() => onSelect(wf.id)} className="w-full text-left px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 transition flex items-center justify-between">
+            <span>{wfFullLabel(wf)}</span>
+            <span className="text-xs text-[#0F4C5C]">Ansehen →</span>
+          </button>
+        ))}
+      </div>
+      <div className="flex justify-end pt-4">
+        <button onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
+          Schließen
+        </button>
+      </div>
+    </Modal>
+  );
+}
 
 function HistoryModal({ sg, sortedWf, getEffectiveZuordnung, onClose }) {
   const rows = [...sortedWf].reverse();
