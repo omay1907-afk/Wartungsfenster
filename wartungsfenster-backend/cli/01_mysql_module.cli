@@ -1,0 +1,17 @@
+# ------------------------------------------------------------------
+# 01_mysql_module.cli
+#
+# Installiert den MySQL-JDBC-Treiber (mysql-connector-j) als JBoss-Modul.
+#
+# VORAUSSETZUNG: Die Treiber-JAR muss vorher heruntergeladen werden
+# (z. B. von https://dev.mysql.com/downloads/connector/j/ oder Maven
+# Central, Koordinaten: com.mysql:mysql-connector-j:8.4.0) und lokal
+# auf dem Rechner liegen, von dem aus Sie die CLI ausführen.
+#
+# Aufruf:
+#   EAP_HOME/bin/jboss-cli.sh --connect --file=01_mysql_module.cli
+#
+# Den Pfad zur JAR unten bei --resources anpassen.
+# ------------------------------------------------------------------
+
+module add --name=com.mysql --resources=/pfad/zu/mysql-connector-j-8.4.0.jar --dependencies=jakarta.transaction.api,jakarta.api

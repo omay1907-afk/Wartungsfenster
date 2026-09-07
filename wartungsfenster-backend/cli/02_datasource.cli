@@ -1,0 +1,33 @@
+# ------------------------------------------------------------------
+# 02_datasource.cli
+#
+# Registriert den MySQL-Treiber im datasources-Subsystem und legt die
+# Datenquelle "WartungsfensterDS" an, auf die persistence.xml im
+# Backend über den JNDI-Namen java:/WartungsfensterDS zugreift.
+#
+# Aufruf:
+#   EAP_HOME/bin/jboss-cli.sh --connect --file=02_datasource.cli
+#
+# Vorher bitte Host, Port, Datenbankname, Benutzer und Passwort unten
+# an Ihre MySQL-Instanz anpassen.
+# ------------------------------------------------------------------
+
+/subsystem=datasources/jdbc-driver=mysql:add(\
+    driver-name=mysql, \
+    driver-module-name=com.mysql, \
+    driver-class-name=com.mysql.cj.jdbc.Driver, \
+    driver-xa-datasource-class-name=com.mysql.cj.jdbc.MysqlXADataSource)
+
+data-source add \
+    --name=WartungsfensterDS \
+    --jndi-name=java:/WartungsfensterDS \
+    --driver-name=mysql \
+    --connection-url=jdbc:mysql://DB_HOST:3306/wartungsfenster?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true \
+    --user-name=DB_BENUTZER \
+    --password=DB_PASSWORT \
+    --min-pool-size=5 \
+    --max-pool-size=20 \
+    --check-valid-connection-sql="SELECT 1" \
+    --enabled=true
+
+:reload
