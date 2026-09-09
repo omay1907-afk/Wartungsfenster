@@ -29,10 +29,12 @@ export const api = {
   getServergruppen: () => http("GET", "/servergruppen"),
   createServergruppen: (payload) => http("POST", "/servergruppen", payload),
   updateServergruppe: (id, payload) => http("PUT", `/servergruppen/${id}`, payload),
+  deleteServergruppe: (id) => http("DELETE", `/servergruppen/${id}`),
 
   // Wartungsfenster
   getWartungsfenster: () => http("GET", "/wartungsfenster"),
   createWartungsfenster: (payload) => http("POST", "/wartungsfenster", payload),
+  deleteWartungsfenster: (id) => http("DELETE", `/wartungsfenster/${id}`),
 
   // Bugfix-Zuordnungen (liegen an der Instanz, nicht an der Servergruppe)
   getBugfixZuordnungen: () => http("GET", "/bugfix-zuordnungen"),

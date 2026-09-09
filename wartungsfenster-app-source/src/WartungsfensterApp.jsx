@@ -460,6 +460,47 @@ export default function WartungsfensterApp() {
     }
   }
 
+  async function deleteWartungsfenster(id) {
+    const wf = wartungsfenster.find((w) => w.id === id);
+    if (!window.confirm(`${wfShortLabel(wf)} wirklich unwiderruflich löschen? Alle darin erfassten Bugfix-Angaben gehen verloren.`)) return;
+    try {
+      await api.deleteWartungsfenster(id);
+      setWartungsfenster((prev) => prev.filter((w) => w.id !== id));
+      setZuordnungen((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      if (activeWfId === id) {
+        const rest = wartungsfenster.filter((w) => w.id !== id);
+        setActiveWfId(getDefaultWfId(rest));
+      }
+    } catch (e) {
+      console.error(e);
+      window.alert("Wartungsfenster konnte nicht gelöscht werden.");
+    }
+  }
+
+  async function deleteServergruppe(env, sgId) {
+    const sg = servergruppen[env]?.find((s) => s.id === sgId);
+    if (!window.confirm(`${sg?.name || "Diese Instanz"} in ${env} wirklich löschen?`)) return;
+    try {
+      await api.deleteServergruppe(sgId);
+      setServergruppen((prev) => ({ ...prev, [env]: prev[env].filter((s) => s.id !== sgId) }));
+      setZuordnungen((prev) => {
+        const next = {};
+        Object.keys(prev).forEach((wfId) => {
+          const { [sgId]: _entfernt, ...rest } = prev[wfId];
+          next[wfId] = rest;
+        });
+        return next;
+      });
+    } catch (e) {
+      console.error(e);
+      window.alert("Instanz konnte nicht gelöscht werden.");
+    }
+  }
+
   async function addDomain(name) {
     const created = await api.createDomaene(name);
     setDomains((prev) => [...prev, created]);
@@ -632,6 +673,11 @@ export default function WartungsfensterApp() {
                 </option>
               ))}
             </select>
+            {activeWf && (
+              <button onClick={() => deleteWartungsfenster(activeWfId)} title="Dieses Wartungsfenster löschen" className="text-slate-300 hover:text-[#DC2626] transition">
+                <Trash2 size={13} />
+              </button>
+            )}
           </div>
           <button
             onClick={() => setShowNewWfModal(true)}
@@ -737,7 +783,7 @@ export default function WartungsfensterApp() {
                   {c.label}
                 </th>
               ))}
-              <th className="sticky top-0 bg-slate-100 px-3 py-2 border-b border-slate-200 text-center w-48">Aktionen</th>
+              <th className="sticky top-0 bg-slate-100 px-3 py-2 border-b border-slate-200 text-center w-52">Aktionen</th>
             </tr>
             <tr>
               {COLUMNS.map((c) => (
@@ -900,6 +946,9 @@ export default function WartungsfensterApp() {
                             <CheckCircle2 size={11} />
                             Eingespielt
                           </button>
+                          <button onClick={() => deleteServergruppe(activeEnv, sg.id)} title="Diese Instanz in dieser Umgebung löschen" className="text-slate-300 hover:text-[#DC2626] transition">
+                            <Trash2 size={14} />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -1003,6 +1052,7 @@ export default function WartungsfensterApp() {
             setActiveWfId(id);
             setShowArchiveModal(false);
           }}
+          onDelete={deleteWartungsfenster}
           onClose={() => setShowArchiveModal(false)}
         />
       )}
@@ -1488,7 +1538,7 @@ function DomainManagerModal({ domains, servergruppen, onAdd, onRename, onDelete,
    Modal: Wartungsfenster-Archiv (ältere Fenster, nicht mehr im Standard-Dropdown)
 --------------------------------------------------------- */
 
-function ArchiveModal({ archivedWf, onSelect, onClose }) {
+function ArchiveModal({ archivedWf, onSelect, onDelete, onClose }) {
   const rows = [...archivedWf].sort((a, b) => b.datum.localeCompare(a.datum));
   return (
     <Modal title="Wartungsfenster-Archiv" onClose={onClose}>
@@ -1497,10 +1547,17 @@ function ArchiveModal({ archivedWf, onSelect, onClose }) {
       </p>
       <div className="border border-slate-200 rounded-md divide-y divide-slate-100">
         {rows.map((wf) => (
-          <button key={wf.id} onClick={() => onSelect(wf.id)} className="w-full text-left px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 transition flex items-center justify-between">
-            <span>{wfFullLabel(wf)}</span>
-            <span className="text-xs text-[#0F4C5C]">Ansehen →</span>
-          </button>
+          <div key={wf.id} className="flex items-center justify-between px-3 py-2 hover:bg-slate-50 transition">
+            <button onClick={() => onSelect(wf.id)} className="text-left text-sm text-slate-600 flex-1">
+              {wfFullLabel(wf)}
+            </button>
+            <span className="text-xs text-[#0F4C5C] mr-3 cursor-pointer" onClick={() => onSelect(wf.id)}>
+              Ansehen →
+            </span>
+            <button onClick={() => onDelete(wf.id)} title="Löschen" className="text-slate-300 hover:text-[#DC2626] transition">
+              <Trash2 size={14} />
+            </button>
+          </div>
         ))}
       </div>
       <div className="flex justify-end pt-4">
