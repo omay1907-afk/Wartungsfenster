@@ -1,7 +1,11 @@
 // Zentrale Anbindung an das Backend (JAX-RS unter /api, siehe backend-Projekt).
 // Alle Funktionen geben Promises zurück und werfen bei Fehlern eine Error.
+//
+// WICHTIG: Bewusst als relativer Pfad ("api", ohne führenden Schrägstrich),
+// damit die Anfragen relativ zum aktuellen Context-Root aufgelöst werden
+// (z. B. /wartungsfenster/api/...), statt relativ zur Domain-Wurzel.
 
-const API_BASE = "/api";
+const API_BASE = "api";
 
 async function http(method, path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
