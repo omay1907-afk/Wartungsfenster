@@ -14,8 +14,8 @@ CREATE TABLE umgebung (
   code            VARCHAR(20)  NOT NULL PRIMARY KEY,
   bezeichnung     VARCHAR(120) NOT NULL,
   gruppe          VARCHAR(20)  NOT NULL,        -- Tab-Gruppe: INT, REF, ABN, EDU, PRD
-  farbe           CHAR(7)      NOT NULL,        -- Hex-Farbe für die Tab-Anzeige
-  sortierung      TINYINT UNSIGNED NOT NULL DEFAULT 0
+  farbe           VARCHAR(7)   NOT NULL,        -- Hex-Farbe für die Tab-Anzeige
+  sortierung      INT UNSIGNED NOT NULL DEFAULT 0
 ) ENGINE=InnoDB;
 
 -- ------------------------------------------------------------
@@ -90,7 +90,7 @@ CREATE TABLE wartungsfenster (
   id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   nummer          VARCHAR(4)   NOT NULL UNIQUE,     -- '01', '02', ... (fortlaufend, von der Anwendung vergeben)
   datum           DATE         NOT NULL,
-  kw              TINYINT UNSIGNED GENERATED ALWAYS AS (WEEKOFYEAR(datum)) STORED,
+  kw              INT UNSIGNED GENERATED ALWAYS AS (WEEKOFYEAR(datum)) STORED,
   atlas_release   VARCHAR(40)  NOT NULL,
   erstellt_am     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
@@ -110,7 +110,7 @@ CREATE TABLE bugfix_zuordnung (
   instanz_id          BIGINT UNSIGNED NOT NULL,
   wartungsfenster_id  BIGINT UNSIGNED NOT NULL,
   bugfix_nr           VARCHAR(30)  NOT NULL DEFAULT '',
-  properties          ENUM('ja','nein') NOT NULL DEFAULT 'nein',
+  properties          VARCHAR(10)  NOT NULL DEFAULT 'nein',
   nexus_link          VARCHAR(255) NOT NULL DEFAULT '',
   bemerkung           VARCHAR(500) NOT NULL DEFAULT '',
   eingespielt         TINYINT(1)   NOT NULL DEFAULT 0,
