@@ -22,7 +22,7 @@ CREATE TABLE umgebung (
 -- Domänen (JBoss-EAP-Domains innerhalb einer Umgebung)
 -- ------------------------------------------------------------
 CREATE TABLE domaene (
-  id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   name            VARCHAR(120) NOT NULL UNIQUE,
   erstellt_am     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
@@ -34,7 +34,7 @@ CREATE TABLE domaene (
 -- die Instanz vorkommt, ohne Daten zu duplizieren.
 -- ------------------------------------------------------------
 CREATE TABLE instanz (
-  id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   name            VARCHAR(120) NOT NULL UNIQUE,
   erstellt_am     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
@@ -44,10 +44,10 @@ CREATE TABLE instanz (
 -- Umgebung (inkl. Domäne) mit den zugehörigen Stammdaten.
 -- ------------------------------------------------------------
 CREATE TABLE servergruppe (
-  id                  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  instanz_id          INT UNSIGNED NOT NULL,
+  id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  instanz_id          BIGINT UNSIGNED NOT NULL,
   umgebung_code       VARCHAR(20)  NOT NULL,
-  domaene_id          INT UNSIGNED NULL,
+  domaene_id          BIGINT UNSIGNED NULL,
   jbossadmin          VARCHAR(120) NOT NULL DEFAULT '',
   jira_kennzeichen    VARCHAR(60)  NOT NULL DEFAULT '',
   ansprechpartner     VARCHAR(120) NOT NULL DEFAULT '',
@@ -75,8 +75,8 @@ CREATE INDEX idx_servergruppe_domaene  ON servergruppe(domaene_id);
 -- Mouseover-Hinweis auf der Instanz-Spalte)
 -- ------------------------------------------------------------
 CREATE TABLE servergruppe_artefakt_vorlage (
-  id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  servergruppe_id INT UNSIGNED NOT NULL,
+  id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  servergruppe_id BIGINT UNSIGNED NOT NULL,
   vorlage         VARCHAR(255) NOT NULL,
 
   CONSTRAINT fk_vorlage_servergruppe
@@ -87,7 +87,7 @@ CREATE TABLE servergruppe_artefakt_vorlage (
 -- Wartungsfenster
 -- ------------------------------------------------------------
 CREATE TABLE wartungsfenster (
-  id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   nummer          VARCHAR(4)   NOT NULL UNIQUE,     -- '01', '02', ... (fortlaufend, von der Anwendung vergeben)
   datum           DATE         NOT NULL,
   kw              TINYINT UNSIGNED GENERATED ALWAYS AS (WEEKOFYEAR(datum)) STORED,
@@ -106,9 +106,9 @@ CREATE INDEX idx_wartungsfenster_datum ON wartungsfenster(datum);
 -- (siehe 05_views.sql), nicht redundant abgespeichert.
 -- ------------------------------------------------------------
 CREATE TABLE bugfix_zuordnung (
-  id                  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  instanz_id          INT UNSIGNED NOT NULL,
-  wartungsfenster_id  INT UNSIGNED NOT NULL,
+  id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  instanz_id          BIGINT UNSIGNED NOT NULL,
+  wartungsfenster_id  BIGINT UNSIGNED NOT NULL,
   bugfix_nr           VARCHAR(30)  NOT NULL DEFAULT '',
   properties          ENUM('ja','nein') NOT NULL DEFAULT 'nein',
   nexus_link          VARCHAR(255) NOT NULL DEFAULT '',
