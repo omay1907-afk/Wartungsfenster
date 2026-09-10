@@ -53,6 +53,12 @@ CREATE TABLE servergruppe (
   ansprechpartner     VARCHAR(120) NOT NULL DEFAULT '',
   aufrufadresse       VARCHAR(255) NOT NULL DEFAULT '',
   soa_endpunkte       VARCHAR(255) NOT NULL DEFAULT '',
+  jdk_version_alt     VARCHAR(30)  NOT NULL DEFAULT '',
+  jdk_version_neu     VARCHAR(30)  NOT NULL DEFAULT '',
+  jdk_auf_neuer_version TINYINT(1) NOT NULL DEFAULT 0,
+  eap_version         VARCHAR(30)  NOT NULL DEFAULT '',
+  ojdbc_version       VARCHAR(30)  NOT NULL DEFAULT '',
+  basisaenderung_eingespielt TINYINT(1) NOT NULL DEFAULT 0,
   farben              JSON         NULL,          -- z. B. {"aufrufadresse":"yellow"}
   erstellt_am         TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
   aktualisiert_am     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

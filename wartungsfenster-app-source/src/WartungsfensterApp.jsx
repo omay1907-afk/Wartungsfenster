@@ -60,6 +60,7 @@ const COLUMNS = [
   { key: "jbossAdmin", label: "JBossAdmin", group: "stamm", mono: false, colorable: true, width: "max-w-[110px]" },
   { key: "jiraKennzeichen", label: "Jira Kennzeichen", group: "stamm", mono: true, colorable: true },
   { key: "name", label: "Instanz", group: "stamm", mono: false, colorable: true },
+  { key: "basisaenderung", label: "Basisänderung", group: "stamm", mono: false, colorable: false },
   { key: "bugfixNr", label: "Bugfix Nr", group: "bugfix", mono: true, colorable: true },
   { key: "properties", label: "Properties", group: "bugfix", mono: false, colorable: false },
   { key: "nexusLink", label: "Nexus Link", group: "bugfix", mono: true, colorable: true, width: "max-w-[300px]" },
@@ -67,7 +68,6 @@ const COLUMNS = [
   { key: "ansprechpartner", label: "Ansprechpartner", group: "stamm", mono: false, colorable: true },
   { key: "aufrufadresse", label: "Aufrufadresse", group: "stamm", mono: true, colorable: true },
   { key: "soaEndpunkte", label: "SOA Endpunkte", group: "stamm", mono: true, colorable: true },
-  { key: "basisaenderung", label: "Basisänderung", group: "stamm", mono: false, colorable: false },
 ];
 
 const PALETTE = [
@@ -94,6 +94,17 @@ function hasBugfixEntry(zu) {
 }
 function hasEinspielung(zu) {
   return zu.properties === "ja" || !!(zu.nexusLink && zu.nexusLink.trim()) || hasBugfixEntry(zu);
+}
+
+// Liefert die aktuell "geltende" JDK-Version einer Servergruppe: je nachdem, ob sie
+// laut Umschalter schon auf der neueren Version läuft oder noch auf der aktuellen.
+function effektiveJdkVersion(sg) {
+  return sg.jdkAufNeuerVersion ? sg.jdkVersionNeu : sg.jdkVersionAlt;
+}
+
+function basisaenderungText(sg) {
+  const teile = [effektiveJdkVersion(sg), sg.eapVersion, sg.ojdbcVersion].filter((v) => v && v.trim());
+  return teile.join(" · ");
 }
 
 function getISOWeek(dateStr) {
@@ -608,8 +619,8 @@ export default function WartungsfensterApp() {
           group.name,
           ...COLUMNS.map((c) => {
             if (c.key === "basisaenderung") {
-              const teile = [sg.jdkVersion, sg.eapVersion, sg.ojdbcVersion].filter((v) => v && v.trim());
-              return teile.length > 0 ? `${teile.join(" · ")}${sg.basisaenderungEingespielt ? " (eingespielt)" : ""}` : "";
+              const text = basisaenderungText(sg);
+              return text ? `${text}${sg.basisaenderungEingespielt ? " (eingespielt)" : ""}` : "";
             }
             if (c.group === "stamm") return sg[c.key] || "";
             if (c.key === "properties") return zu.properties === "ja" ? "JA" : "NEIN";
@@ -647,9 +658,6 @@ export default function WartungsfensterApp() {
           </div>
         </div>
         <div className="flex gap-2 flex-wrap items-center">
-          <button onClick={exportToExcel} className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition">
-            <Download size={16} /> Export zu Excel
-          </button>
           <button
             onClick={() => setShowDomainModal(true)}
             className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition"
@@ -663,16 +671,16 @@ export default function WartungsfensterApp() {
             <Cpu size={16} /> Basisänderung erfassen
           </button>
           <button
-            onClick={() => setShowBugfixModal(true)}
+            onClick={() => setShowNewSgModal(true)}
             className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition"
           >
-            <Plus size={16} /> Bugfix erfassen
+            <Plus size={16} /> Instanz
           </button>
           <button
-            onClick={() => setShowNewSgModal(true)}
+            onClick={() => setShowBugfixModal(true)}
             className="bg-[#F2A541] hover:brightness-95 text-[#0F4C5C] font-medium text-sm px-3 py-2 rounded-md flex items-center gap-2 transition"
           >
-            <Plus size={16} /> Instanz
+            <Plus size={16} /> Bugfix erfassen
           </button>
         </div>
       </header>
@@ -698,6 +706,12 @@ export default function WartungsfensterApp() {
           })}
         </div>
         <div className="flex items-center gap-2 py-2">
+          <button
+            onClick={exportToExcel}
+            className="text-xs text-slate-600 border border-slate-300 hover:bg-slate-50 px-2.5 py-1.5 rounded-md flex items-center gap-1.5 transition"
+          >
+            <Download size={13} /> Export zu Excel
+          </button>
           <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5">
             <CalendarClock size={15} className="text-slate-500" />
             <select value={activeWfId} onChange={(e) => setActiveWfId(e.target.value)} className="bg-transparent text-sm outline-none text-slate-700">
@@ -905,8 +919,7 @@ export default function WartungsfensterApp() {
                           );
                         }
                         if (c.key === "basisaenderung") {
-                          const teile = [sg.jdkVersion, sg.eapVersion, sg.ojdbcVersion].filter((v) => v && v.trim());
-                          const text = teile.length > 0 ? teile.join(" · ") : "";
+                          const text = basisaenderungText(sg);
                           return (
                             <td
                               key={c.key}
@@ -1351,10 +1364,17 @@ function BasisModal({ env, sg, domains, onClose, onSave }) {
           </React.Fragment>
         ))}
         <Field label="Basisänderung">
-          <div className="grid grid-cols-3 gap-2 mb-2">
-            <input className={inputCls} placeholder="JDK-Version" value={form.jdkVersion || ""} onChange={(e) => set("jdkVersion", e.target.value)} />
-            <input className={inputCls} placeholder="EAP-Version" value={form.eapVersion || ""} onChange={(e) => set("eapVersion", e.target.value)} />
-            <input className={inputCls} placeholder="OJDBC-Version" value={form.ojdbcVersion || ""} onChange={(e) => set("ojdbcVersion", e.target.value)} />
+          <div className="grid grid-cols-2 gap-2 mb-2">
+            <input className={inputCls} placeholder="JDK-Version aktuell (z. B. 17.0.x)" value={form.jdkVersionAlt || ""} onChange={(e) => set("jdkVersionAlt", e.target.value)} />
+            <input className={inputCls} placeholder="JDK-Version neu (z. B. 21.0.x)" value={form.jdkVersionNeu || ""} onChange={(e) => set("jdkVersionNeu", e.target.value)} />
+          </div>
+          <label className="flex items-center gap-2 text-sm mb-3">
+            <input type="checkbox" checked={!!form.jdkAufNeuerVersion} onChange={(e) => set("jdkAufNeuerVersion", e.target.checked)} />
+            Läuft bereits auf der neueren Java-Version
+          </label>
+          <div className="grid grid-cols-2 gap-2 mb-2">
+            <input className={inputCls} placeholder="EAP-Version (z. B. 8.1.x)" value={form.eapVersion || ""} onChange={(e) => set("eapVersion", e.target.value)} />
+            <input className={inputCls} placeholder="OJDBC-Version (z. B. 19.xx)" value={form.ojdbcVersion || ""} onChange={(e) => set("ojdbcVersion", e.target.value)} />
           </div>
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={!!form.basisaenderungEingespielt} onChange={(e) => set("basisaenderungEingespielt", e.target.checked)} />
@@ -1658,7 +1678,8 @@ function DomainManagerModal({ domains, servergruppen, onAdd, onRename, onDelete,
 --------------------------------------------------------- */
 
 function BasisaenderungBulkModal({ onClose, onSubmit }) {
-  const [jdkVersion, setJdkVersion] = useState("");
+  const [jdkVersionAlt, setJdkVersionAlt] = useState("");
+  const [jdkVersionNeu, setJdkVersionNeu] = useState("");
   const [eapVersion, setEapVersion] = useState("");
   const [ojdbcVersion, setOjdbcVersion] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -1666,7 +1687,7 @@ function BasisaenderungBulkModal({ onClose, onSubmit }) {
   async function handleSubmit(e) {
     e.preventDefault();
     setSubmitting(true);
-    await onSubmit({ jdkVersion, eapVersion, ojdbcVersion });
+    await onSubmit({ jdkVersionAlt, jdkVersionNeu, eapVersion, ojdbcVersion });
     setSubmitting(false);
   }
 
@@ -1674,16 +1695,23 @@ function BasisaenderungBulkModal({ onClose, onSubmit }) {
     <Modal title="Basisänderung erfassen" onClose={onClose}>
       <form onSubmit={handleSubmit}>
         <p className="text-xs text-slate-500 mb-4 bg-slate-50 border border-slate-200 rounded-md px-3 py-2">
-          Wird auf <strong>alle</strong> Instanzen in allen Umgebungen angewendet. Der "Eingespielt"-Status wird dabei für alle zurückgesetzt. Einzelne Instanzen lassen sich danach über "Stammdaten bearbeiten" individuell abweichend anpassen oder als eingespielt markieren.
+          Wird auf <strong>alle</strong> Instanzen in allen Umgebungen angewendet. Der "Eingespielt"-Status wird dabei für alle zurückgesetzt. Alle Felder sind optional. Einzelne
+          Instanzen lassen sich danach über "Stammdaten bearbeiten" individuell abweichend anpassen oder als eingespielt markieren.
         </p>
-        <Field label="JDK-Version">
-          <input required className={inputCls} placeholder="z. B. 21" value={jdkVersion} onChange={(e) => setJdkVersion(e.target.value)} />
+        <Field label="JDK-Version aktuell">
+          <input className={inputCls} placeholder="z. B. 17.0.x" value={jdkVersionAlt} onChange={(e) => setJdkVersionAlt(e.target.value)} />
+        </Field>
+        <Field label="JDK-Version neu">
+          <input className={inputCls} placeholder="z. B. 21.0.x" value={jdkVersionNeu} onChange={(e) => setJdkVersionNeu(e.target.value)} />
+          <p className="text-xs text-slate-400 mt-1">
+            Bei jeder Instanz lässt sich später einzeln angeben, ob sie schon auf der neueren oder noch auf der aktuellen Version läuft — die passende Version wird dann automatisch übernommen.
+          </p>
         </Field>
         <Field label="EAP-Version">
-          <input required className={inputCls} placeholder="z. B. 8.1" value={eapVersion} onChange={(e) => setEapVersion(e.target.value)} />
+          <input className={inputCls} placeholder="z. B. 8.1.x" value={eapVersion} onChange={(e) => setEapVersion(e.target.value)} />
         </Field>
         <Field label="OJDBC-Version">
-          <input required className={inputCls} placeholder="z. B. 23.4" value={ojdbcVersion} onChange={(e) => setOjdbcVersion(e.target.value)} />
+          <input className={inputCls} placeholder="z. B. 19.xx" value={ojdbcVersion} onChange={(e) => setOjdbcVersion(e.target.value)} />
         </Field>
         <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
           <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
