@@ -17,6 +17,7 @@ import {
   ArrowRightCircle,
   Archive,
   Search,
+  Cpu,
 } from "lucide-react";
 
 /* ---------------------------------------------------------
@@ -66,6 +67,7 @@ const COLUMNS = [
   { key: "ansprechpartner", label: "Ansprechpartner", group: "stamm", mono: false, colorable: true },
   { key: "aufrufadresse", label: "Aufrufadresse", group: "stamm", mono: true, colorable: true },
   { key: "soaEndpunkte", label: "SOA Endpunkte", group: "stamm", mono: true, colorable: true },
+  { key: "basisaenderung", label: "Basisänderung", group: "stamm", mono: false, colorable: false },
 ];
 
 const PALETTE = [
@@ -194,7 +196,11 @@ function ColorPicker({ value, onChange }) {
 
 function DomainSelect({ domains, value, onChange }) {
   return (
-    <select value={value || NO_DOMAIN} onChange={(e) => onChange(e.target.value === NO_DOMAIN ? null : e.target.value)} className={inputCls}>
+    <select
+      value={value || NO_DOMAIN}
+      onChange={(e) => onChange(e.target.value === NO_DOMAIN ? null : Number(e.target.value))}
+      className={inputCls}
+    >
       <option value={NO_DOMAIN}>Keine Domäne</option>
       {domains.map((d) => (
         <option key={d.id} value={d.id}>
@@ -339,6 +345,7 @@ export default function WartungsfensterApp() {
   const [showBugfixModal, setShowBugfixModal] = useState(false);
   const [showNewWfModal, setShowNewWfModal] = useState(false);
   const [showDomainModal, setShowDomainModal] = useState(false);
+  const [showBasisaenderungModal, setShowBasisaenderungModal] = useState(false);
   const [showArchiveModal, setShowArchiveModal] = useState(false);
 
   const activeEnv = activeGroup === "REF" ? activeSub : activeGroup;
@@ -426,7 +433,7 @@ export default function WartungsfensterApp() {
       const created = await api.createServergruppen({
         umgebungCodes: envs,
         instanzName: sgData.name,
-        domainId: sgData.domainId,
+        domainIdByUmgebung: sgData.domainIdByUmgebung,
         jbossAdmin: sgData.jbossAdmin,
         jiraKennzeichen: sgData.jiraKennzeichen,
         ansprechpartner: sgData.ansprechpartner,
@@ -447,16 +454,16 @@ export default function WartungsfensterApp() {
     }
   }
 
-  async function addWartungsfenster({ datum, atlasRelease }) {
+  async function addWartungsfenster({ datum, atlasRelease, nummer }) {
     try {
-      const wf = await api.createWartungsfenster({ datum, atlasRelease });
+      const wf = await api.createWartungsfenster({ datum, atlasRelease, nummer });
       setWartungsfenster((prev) => [...prev, wf]);
       const bugfixRows = await api.getBugfixZuordnungen();
       setZuordnungen(buildZuordnungen(servergruppen, bugfixRows));
       setActiveWfId(wf.id);
     } catch (e) {
       console.error(e);
-      window.alert("Wartungsfenster konnte nicht angelegt werden. Ist das Backend erreichbar?");
+      window.alert(e.message?.includes("409") || e.message?.includes("bereits vergeben") ? "Diese Wartungsfenster-Nummer ist bereits vergeben. Bitte eine andere wählen." : "Wartungsfenster konnte nicht angelegt werden. Ist das Backend erreichbar?");
     }
   }
 
@@ -498,6 +505,23 @@ export default function WartungsfensterApp() {
     } catch (e) {
       console.error(e);
       window.alert("Instanz konnte nicht gelöscht werden.");
+    }
+  }
+
+  async function applyBasisaenderungToAll(payload) {
+    try {
+      const aktualisiert = await api.bulkSetBasisaenderung(payload);
+      const byId = new Map(aktualisiert.map((sg) => [sg.id, sg]));
+      setServergruppen((prev) => {
+        const next = {};
+        Object.keys(prev).forEach((env) => {
+          next[env] = prev[env].map((sg) => byId.get(sg.id) || sg);
+        });
+        return next;
+      });
+    } catch (e) {
+      console.error(e);
+      window.alert("Basisänderung konnte nicht auf alle Instanzen angewendet werden. Ist das Backend erreichbar?");
     }
   }
 
@@ -583,6 +607,10 @@ export default function WartungsfensterApp() {
         return [
           group.name,
           ...COLUMNS.map((c) => {
+            if (c.key === "basisaenderung") {
+              const teile = [sg.jdkVersion, sg.eapVersion, sg.ojdbcVersion].filter((v) => v && v.trim());
+              return teile.length > 0 ? `${teile.join(" · ")}${sg.basisaenderungEingespielt ? " (eingespielt)" : ""}` : "";
+            }
             if (c.group === "stamm") return sg[c.key] || "";
             if (c.key === "properties") return zu.properties === "ja" ? "JA" : "NEIN";
             return zu[c.key] || "";
@@ -627,6 +655,12 @@ export default function WartungsfensterApp() {
             className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition"
           >
             <Layers size={16} /> Domänen verwalten
+          </button>
+          <button
+            onClick={() => setShowBasisaenderungModal(true)}
+            className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition"
+          >
+            <Cpu size={16} /> Basisänderung erfassen
           </button>
           <button
             onClick={() => setShowBugfixModal(true)}
@@ -870,6 +904,20 @@ export default function WartungsfensterApp() {
                             </td>
                           );
                         }
+                        if (c.key === "basisaenderung") {
+                          const teile = [sg.jdkVersion, sg.eapVersion, sg.ojdbcVersion].filter((v) => v && v.trim());
+                          const text = teile.length > 0 ? teile.join(" · ") : "";
+                          return (
+                            <td
+                              key={c.key}
+                              className={`px-3 py-2 border-b border-slate-100 max-w-[200px] truncate ${
+                                sg.basisaenderungEingespielt ? "bg-green-50 text-green-700 font-medium" : ""
+                              }`}
+                            >
+                              {text || <span className="text-slate-300">—</span>}
+                            </td>
+                          );
+                        }
                         if (c.group === "stamm") {
                           return (
                             <td key={c.key} style={cellStyleStamm(c.key, sg)} className={`px-3 py-2 border-b border-slate-100 ${c.width || "max-w-[200px]"} truncate ${c.mono ? "font-mono text-[11px]" : ""}`}>
@@ -1025,7 +1073,9 @@ export default function WartungsfensterApp() {
 
       {showNewWfModal && (
         <NewWartungsfensterModal
-          nextNummer={String(wartungsfenster.length + 1).padStart(2, "0")}
+          nextNummer={String(
+            Math.max(0, ...wartungsfenster.map((w) => parseInt(w.nummer, 10) || 0)) + 1
+          ).padStart(2, "0")}
           onClose={() => setShowNewWfModal(false)}
           onSubmit={(data) => {
             addWartungsfenster(data);
@@ -1042,6 +1092,16 @@ export default function WartungsfensterApp() {
           onRename={renameDomain}
           onDelete={deleteDomain}
           onClose={() => setShowDomainModal(false)}
+        />
+      )}
+
+      {showBasisaenderungModal && (
+        <BasisaenderungBulkModal
+          onClose={() => setShowBasisaenderungModal(false)}
+          onSubmit={async (payload) => {
+            await applyBasisaenderungToAll(payload);
+            setShowBasisaenderungModal(false);
+          }}
         />
       )}
 
@@ -1066,7 +1126,8 @@ export default function WartungsfensterApp() {
 
 function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSubmit }) {
   const [selectedEnvs, setSelectedEnvs] = useState(() => new Set([defaultEnv]));
-  const [domainId, setDomainId] = useState(null);
+  const [masterDomainId, setMasterDomainId] = useState(null);
+  const [domainByEnv, setDomainByEnv] = useState({});
   const [newDomainName, setNewDomainName] = useState("");
   const [form, setForm] = useState({
     jbossAdmin: "",
@@ -1084,20 +1145,49 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
   function toggleEnv(key) {
     setSelectedEnvs((prev) => {
       const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+        setDomainByEnv((d) => (key in d ? d : { ...d, [key]: masterDomainId }));
+      }
+      return next;
+    });
+  }
+  function selectAllEnvs() {
+    setSelectedEnvs(new Set(ALL_ENV_KEYS));
+    setDomainByEnv((prev) => {
+      const next = { ...prev };
+      ALL_ENV_KEYS.forEach((env) => {
+        if (!(env in next)) next[env] = masterDomainId;
+      });
+      return next;
+    });
+  }
+  function handleMasterDomainChange(v) {
+    setMasterDomainId(v);
+    setDomainByEnv((prev) => {
+      const next = { ...prev };
+      selectedEnvs.forEach((env) => {
+        next[env] = v;
+      });
       return next;
     });
   }
   async function handleAddDomainInline() {
     if (!newDomainName.trim()) return;
     const id = await onAddDomain(newDomainName.trim());
-    setDomainId(id);
+    handleMasterDomainChange(id);
     setNewDomainName("");
   }
   function handleSubmit(e) {
     e.preventDefault();
     if (selectedEnvs.size === 0) return;
-    onSubmit(Array.from(selectedEnvs), { ...form, artefaktVorlagen: form.artefaktVorlagen.filter((v) => v && v.trim()), domainId });
+    const domainIdByUmgebung = {};
+    selectedEnvs.forEach((env) => {
+      domainIdByUmgebung[env] = domainByEnv[env] ?? null;
+    });
+    onSubmit(Array.from(selectedEnvs), { ...form, artefaktVorlagen: form.artefaktVorlagen.filter((v) => v && v.trim()), domainIdByUmgebung });
   }
 
   return (
@@ -1107,7 +1197,7 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
           <div className="border border-slate-200 rounded-md p-3">
             <div className="flex items-center gap-2 pb-2 mb-3 border-b border-slate-100">
               <span className="text-sm font-medium text-slate-700 mr-auto">Auswahl</span>
-              <button type="button" onClick={() => setSelectedEnvs(new Set(ALL_ENV_KEYS))} className="text-xs px-2.5 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">
+              <button type="button" onClick={selectAllEnvs} className="text-xs px-2.5 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">
                 Alle
               </button>
               <button type="button" onClick={() => setSelectedEnvs(new Set())} className="text-xs px-2.5 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">
@@ -1155,13 +1245,13 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
           {selectedEnvs.size === 0 && <p className="text-xs text-[#DC2626] mt-1">Bitte mindestens eine Umgebung auswählen.</p>}
           {selectedEnvs.size > 1 && (
             <p className="text-xs text-slate-400 mt-1">
-              Wird identisch in {selectedEnvs.size} Umgebungen angelegt. Abweichungen lassen sich danach je Umgebung über "Stammdaten bearbeiten" anpassen.
+              Wird identisch in {selectedEnvs.size} Umgebungen angelegt (Stammdaten). Domänen können je Umgebung unten abweichend gesetzt werden.
             </p>
           )}
         </Field>
 
-        <Field label="Domäne">
-          <DomainSelect domains={domains} value={domainId} onChange={setDomainId} />
+        <Field label="Domäne (Vorbelegung für alle ausgewählten Umgebungen)">
+          <DomainSelect domains={domains} value={masterDomainId} onChange={handleMasterDomainChange} />
           <div className="flex gap-2 mt-2">
             <input className={inputCls} placeholder="Neue Domäne anlegen…" value={newDomainName} onChange={(e) => setNewDomainName(e.target.value)} />
             <button type="button" onClick={handleAddDomainInline} className="px-3 py-2 text-xs bg-slate-100 hover:bg-slate-200 rounded-md text-slate-600 whitespace-nowrap">
@@ -1169,6 +1259,23 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
             </button>
           </div>
         </Field>
+
+        {selectedEnvs.size > 0 && (
+          <Field label="Domäne je Umgebung (bei Bedarf einzeln anpassen)">
+            <div className="space-y-2 border border-slate-200 rounded-md p-3">
+              {ALL_ENV_KEYS.filter((env) => selectedEnvs.has(env)).map((env) => (
+                <div key={env} className="flex items-center gap-2">
+                  <span className="text-xs text-slate-500 w-20 shrink-0">{env}</span>
+                  <DomainSelect
+                    domains={domains}
+                    value={domainByEnv[env] ?? null}
+                    onChange={(v) => setDomainByEnv((prev) => ({ ...prev, [env]: v }))}
+                  />
+                </div>
+              ))}
+            </div>
+          </Field>
+        )}
 
         <Field label="Jira Kennzeichen">
           <input className={inputCls} value={form.jiraKennzeichen} onChange={(e) => set("jiraKennzeichen", e.target.value)} />
@@ -1228,7 +1335,7 @@ function BasisModal({ env, sg, domains, onClose, onSave }) {
         <Field label="Domäne">
           <DomainSelect domains={domains} value={form.domainId} onChange={(v) => set("domainId", v)} />
         </Field>
-        {COLUMNS.filter((c) => c.group === "stamm").map((c) => (
+        {COLUMNS.filter((c) => c.group === "stamm" && c.key !== "basisaenderung").map((c) => (
           <React.Fragment key={c.key}>
             <Field label={c.label}>
               <div className="flex gap-2 items-center">
@@ -1243,6 +1350,17 @@ function BasisModal({ env, sg, domains, onClose, onSave }) {
             )}
           </React.Fragment>
         ))}
+        <Field label="Basisänderung">
+          <div className="grid grid-cols-3 gap-2 mb-2">
+            <input className={inputCls} placeholder="JDK-Version" value={form.jdkVersion || ""} onChange={(e) => set("jdkVersion", e.target.value)} />
+            <input className={inputCls} placeholder="EAP-Version" value={form.eapVersion || ""} onChange={(e) => set("eapVersion", e.target.value)} />
+            <input className={inputCls} placeholder="OJDBC-Version" value={form.ojdbcVersion || ""} onChange={(e) => set("ojdbcVersion", e.target.value)} />
+          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={!!form.basisaenderungEingespielt} onChange={(e) => set("basisaenderungEingespielt", e.target.checked)} />
+            Eingespielt (Spalte wird grün markiert)
+          </label>
+        </Field>
         <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
           <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
             Abbrechen
@@ -1415,12 +1533,13 @@ function BugfixQuickModal({ defaultEnv, servergruppen, wf, onClose, onSubmit }) 
 --------------------------------------------------------- */
 
 function NewWartungsfensterModal({ nextNummer, onClose, onSubmit }) {
+  const [nummer, setNummer] = useState(nextNummer);
   const [datum, setDatum] = useState("");
   const [atlasRelease, setAtlasRelease] = useState("ATLAS 10.2.2");
 
   function handleSubmit(e) {
     e.preventDefault();
-    onSubmit({ datum, atlasRelease });
+    onSubmit({ datum, atlasRelease, nummer });
   }
 
   const kw = getISOWeek(datum);
@@ -1429,9 +1548,13 @@ function NewWartungsfensterModal({ nextNummer, onClose, onSubmit }) {
     <Modal title="Neues Wartungsfenster anlegen" onClose={onClose}>
       <form onSubmit={handleSubmit}>
         <p className="text-xs text-slate-500 mb-4 bg-slate-50 border border-slate-200 rounded-md px-3 py-2">
-          Wird angelegt als: <strong>Wartungsfenster {nextNummer}</strong>
-          {datum ? ` (${datum} · KW ${kw} · ${atlasRelease})` : ""}. Die Nummer wird automatisch vergeben.
+          Wird angelegt als: <strong>Wartungsfenster {nummer}</strong>
+          {datum ? ` (${datum} · KW ${kw} · ${atlasRelease})` : ""}.
         </p>
+        <Field label="Nummer">
+          <input required className={inputCls} value={nummer} onChange={(e) => setNummer(e.target.value)} />
+          <p className="text-xs text-slate-400 mt-1">Wird automatisch als nächste freie Nummer vorgeschlagen ({nextNummer}), kann bei Bedarf angepasst werden.</p>
+        </Field>
         <Field label="Datum">
           <input required type="date" className={inputCls} value={datum} onChange={(e) => setDatum(e.target.value)} />
         </Field>
@@ -1526,6 +1649,51 @@ function DomainManagerModal({ domains, servergruppen, onAdd, onRename, onDelete,
           Schließen
         </button>
       </div>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------
+   Modal: Basisänderung erfassen (wird auf alle Instanzen angewendet)
+--------------------------------------------------------- */
+
+function BasisaenderungBulkModal({ onClose, onSubmit }) {
+  const [jdkVersion, setJdkVersion] = useState("");
+  const [eapVersion, setEapVersion] = useState("");
+  const [ojdbcVersion, setOjdbcVersion] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setSubmitting(true);
+    await onSubmit({ jdkVersion, eapVersion, ojdbcVersion });
+    setSubmitting(false);
+  }
+
+  return (
+    <Modal title="Basisänderung erfassen" onClose={onClose}>
+      <form onSubmit={handleSubmit}>
+        <p className="text-xs text-slate-500 mb-4 bg-slate-50 border border-slate-200 rounded-md px-3 py-2">
+          Wird auf <strong>alle</strong> Instanzen in allen Umgebungen angewendet. Der "Eingespielt"-Status wird dabei für alle zurückgesetzt. Einzelne Instanzen lassen sich danach über "Stammdaten bearbeiten" individuell abweichend anpassen oder als eingespielt markieren.
+        </p>
+        <Field label="JDK-Version">
+          <input required className={inputCls} placeholder="z. B. 21" value={jdkVersion} onChange={(e) => setJdkVersion(e.target.value)} />
+        </Field>
+        <Field label="EAP-Version">
+          <input required className={inputCls} placeholder="z. B. 8.1" value={eapVersion} onChange={(e) => setEapVersion(e.target.value)} />
+        </Field>
+        <Field label="OJDBC-Version">
+          <input required className={inputCls} placeholder="z. B. 23.4" value={ojdbcVersion} onChange={(e) => setOjdbcVersion(e.target.value)} />
+        </Field>
+        <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
+          <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
+            Abbrechen
+          </button>
+          <button type="submit" disabled={submitting} className="px-4 py-2 text-sm bg-[#0F4C5C] text-white rounded-md hover:brightness-110 disabled:opacity-50">
+            {submitting ? "Wird angewendet…" : "Auf alle Instanzen anwenden"}
+          </button>
+        </div>
+      </form>
     </Modal>
   );
 }

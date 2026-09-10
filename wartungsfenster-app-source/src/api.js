@@ -34,6 +34,7 @@ export const api = {
   createServergruppen: (payload) => http("POST", "/servergruppen", payload),
   updateServergruppe: (id, payload) => http("PUT", `/servergruppen/${id}`, payload),
   deleteServergruppe: (id) => http("DELETE", `/servergruppen/${id}`),
+  bulkSetBasisaenderung: (payload) => http("PUT", "/servergruppen/basisaenderung", payload),
 
   // Wartungsfenster
   getWartungsfenster: () => http("GET", "/wartungsfenster"),
