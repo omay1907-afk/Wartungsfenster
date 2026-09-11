@@ -45,15 +45,29 @@ CREATE TABLE bugfix_instanz (
   UNIQUE KEY uq_bugfix_instanz (bugfix_id, instanz_id)
 ) ENGINE=InnoDB;
 
--- Vorhandene Daten aus bugfix_zuordnung übernehmen: pro (instanz, wartungsfenster)
--- mit tatsächlich eingetragenem Bugfix wird ein eigener bugfix-Datensatz mit genau
--- einer zugeordneten Instanz angelegt (die bisherige automatische Fortschreibung in
--- spätere Fenster entfällt dabei bewusst - jedes Fenster zeigt ab jetzt nur noch,
--- was für dieses Fenster auch tatsächlich explizit eingetragen war).
+-- ------------------------------------------------------------
+-- Datenübernahme aus bugfix_zuordnung, in zwei Teilen:
+--
+-- TEIL 1: Zeilen MIT Bugfixnummer werden pro (Fenster, Bugfixnummer)
+-- zu EINEM gemeinsamen Bugfix zusammengeführt - genau der Fall, dass
+-- ein Bugfix mehrere Instanzen gleichzeitig betrifft.
+--
+-- TEIL 2: Zeilen OHNE Bugfixnummer (aber mit gesetztem Properties-
+-- Flag oder Nexus-Link) haben keinen gemeinsamen Nenner, über den
+-- sie sinnvoll zusammengeführt werden könnten - jede bekommt daher
+-- ihren eigenen, separaten Bugfix-Datensatz.
+--
+-- Die bisherige automatische Fortschreibung in spätere Fenster
+-- entfällt dabei bewusst - jedes Fenster zeigt ab jetzt nur noch,
+-- was für dieses Fenster auch tatsächlich explizit eingetragen war.
+-- ------------------------------------------------------------
+
+-- TEIL 1: zusammengeführte Bugfixe (mit Nummer)
 INSERT INTO bugfix (wartungsfenster_id, bugfix_nr, nexus_link)
-SELECT wartungsfenster_id, bugfix_nr, nexus_link
+SELECT wartungsfenster_id, bugfix_nr, MAX(CASE WHEN nexus_link <> '' THEN nexus_link END)
 FROM bugfix_zuordnung
-WHERE bugfix_nr <> '' OR nexus_link <> '' OR properties = 'ja';
+WHERE bugfix_nr <> ''
+GROUP BY wartungsfenster_id, bugfix_nr;
 
 INSERT INTO bugfix_instanz (bugfix_id, instanz_id, properties, bemerkung, eingespielt)
 SELECT b.id, z.instanz_id, z.properties, z.bemerkung, z.eingespielt
@@ -61,8 +75,26 @@ FROM bugfix_zuordnung z
 JOIN bugfix b
   ON b.wartungsfenster_id = z.wartungsfenster_id
  AND b.bugfix_nr = z.bugfix_nr
- AND b.nexus_link = z.nexus_link
-WHERE z.bugfix_nr <> '' OR z.nexus_link <> '' OR z.properties = 'ja';
+WHERE z.bugfix_nr <> '';
+
+-- TEIL 2: einzelne Bugfixe ohne Nummer (je Quellzeile ein eigener
+-- Datensatz). Verknüpfung über eine temporäre Hilfsspalte, damit jede
+-- neue Zeile eindeutig ihrer ursprünglichen bugfix_zuordnung-Zeile
+-- zugeordnet werden kann (nicht über Fenster/Nummer/Link möglich, da
+-- diese Zeilen keine eindeutigen gemeinsamen Werte haben).
+ALTER TABLE bugfix ADD COLUMN migration_quelle_id BIGINT UNSIGNED NULL;
+
+INSERT INTO bugfix (wartungsfenster_id, bugfix_nr, nexus_link, migration_quelle_id)
+SELECT wartungsfenster_id, '', nexus_link, id
+FROM bugfix_zuordnung
+WHERE bugfix_nr = '' AND (nexus_link <> '' OR properties = 'ja');
+
+INSERT INTO bugfix_instanz (bugfix_id, instanz_id, properties, bemerkung, eingespielt)
+SELECT b.id, z.instanz_id, z.properties, z.bemerkung, z.eingespielt
+FROM bugfix_zuordnung z
+JOIN bugfix b ON b.migration_quelle_id = z.id;
+
+ALTER TABLE bugfix DROP COLUMN migration_quelle_id;
 
 DROP TABLE bugfix_zuordnung;
 
