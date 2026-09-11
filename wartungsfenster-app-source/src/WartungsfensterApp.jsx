@@ -424,7 +424,7 @@ export default function WartungsfensterApp() {
 
   async function createBugfix(payload) {
     try {
-      const created = await api.createBugfix({ ...payload, wartungsfensterId: activeWfId });
+      const created = await api.createBugfix(payload);
       setBugfixe((prev) => [...prev, created]);
     } catch (e) {
       console.error(e);
@@ -782,10 +782,7 @@ export default function WartungsfensterApp() {
           <button onClick={() => setShowBasisaenderungModal(true)} className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition">
             <Cpu size={16} /> Basisänderung erfassen
           </button>
-          <button onClick={() => setShowNewSgModal(true)} className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition">
-            <Plus size={16} /> Instanz
-          </button>
-          <button onClick={() => setShowInstanzManagerModal(true)} className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition" title="Instanzen komplett (in allen Umgebungen) löschen">
+          <button onClick={() => setShowInstanzManagerModal(true)} className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition" title="Instanzen anlegen oder komplett löschen">
             <Boxes size={16} /> Instanzen verwalten
           </button>
           <button onClick={() => setShowBugfixModal(true)} className="bg-[#F2A541] hover:brightness-95 text-[#0F4C5C] font-medium text-sm px-3 py-2 rounded-md flex items-center gap-2 transition">
@@ -1242,6 +1239,10 @@ export default function WartungsfensterApp() {
               window.alert("Instanz konnte nicht überall gelöscht werden.");
             }
           }}
+          onOpenNew={() => {
+            setShowInstanzManagerModal(false);
+            setShowNewSgModal(true);
+          }}
           onClose={() => setShowInstanzManagerModal(false)}
         />
       )}
@@ -1274,8 +1275,8 @@ export default function WartungsfensterApp() {
       {showBugfixModal && (
         <BugfixCreateModal
           activeWf={activeWf}
+          dropdownWf={dropdownWf}
           alleInstanzen={alleInstanzen}
-          defaultInstanzName={rows[0]?.name}
           onClose={() => setShowBugfixModal(false)}
           onSubmit={async (payload) => {
             await createBugfix(payload);
@@ -1450,9 +1451,6 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
           </Field>
         )}
 
-        <Field label="JBossAdmin">
-          <input className={inputCls} value={form.jbossAdmin} onChange={(e) => set("jbossAdmin", e.target.value)} />
-        </Field>
         <Field label="Jira Kennzeichen">
           <input className={inputCls} value={form.jiraKennzeichen} onChange={(e) => set("jiraKennzeichen", e.target.value)} />
         </Field>
@@ -1504,9 +1502,6 @@ function BasisModal({ env, sg, domains, activeWf, initialBasis, onClose, onSave 
   function set(key, val) {
     setForm((f) => ({ ...f, [key]: val }));
   }
-  function setColor(key, colorKey) {
-    setForm((f) => ({ ...f, colors: { ...f.colors, [key]: colorKey } }));
-  }
   function setBasisField(key, val) {
     setBasis((b) => ({ ...b, [key]: val }));
   }
@@ -1525,10 +1520,7 @@ function BasisModal({ env, sg, domains, activeWf, initialBasis, onClose, onSave 
         {COLUMNS.filter((c) => c.group === "stamm" && c.key !== "basisaenderung").map((c) => (
           <React.Fragment key={c.key}>
             <Field label={c.label}>
-              <div className="flex gap-2 items-center">
-                <input className={inputCls} value={form[c.key] || ""} onChange={(e) => set(c.key, e.target.value)} />
-                <ColorPicker value={form.colors?.[c.key]} onChange={(v) => setColor(c.key, v)} />
-              </div>
+              <input className={inputCls} value={form[c.key] || ""} onChange={(e) => set(c.key, e.target.value)} />
             </Field>
             {c.key === "name" && (
               <Field label="Artefakt-Namensvorlage(n)">
@@ -1641,7 +1633,8 @@ function BugfixEditModal({ sg, zu, activeWf, onClose, onSave }) {
    Modal: Bugfix erfassen (1-n Instanzen auf einmal auswählbar)
 --------------------------------------------------------- */
 
-function BugfixCreateModal({ activeWf, alleInstanzen, onClose, onSubmit }) {
+function BugfixCreateModal({ activeWf, dropdownWf, alleInstanzen, onClose, onSubmit }) {
+  const [wartungsfensterId, setWartungsfensterId] = useState(activeWf?.id ?? "");
   const [bugfixNr, setBugfixNr] = useState("");
   const [nexusLink, setNexusLink] = useState("");
   const [bemerkung, setBemerkung] = useState("");
@@ -1659,15 +1652,24 @@ function BugfixCreateModal({ activeWf, alleInstanzen, onClose, onSubmit }) {
 
   async function handleSubmit(e) {
     e.preventDefault();
-    if (ausgewaehlt.size === 0) return;
+    if (ausgewaehlt.size === 0 || !wartungsfensterId) return;
     setSubmitting(true);
-    await onSubmit({ bugfixNr, nexusLink, bemerkung, properties, instanzNamen: Array.from(ausgewaehlt) });
+    await onSubmit({ wartungsfensterId, bugfixNr, nexusLink, bemerkung, properties, instanzNamen: Array.from(ausgewaehlt) });
     setSubmitting(false);
   }
 
   return (
-    <Modal title={`Bugfix erfassen — ${wfShortLabel(activeWf)}`} onClose={onClose}>
+    <Modal title="Bugfix erfassen" onClose={onClose}>
       <form onSubmit={handleSubmit}>
+        <Field label="Wartungsfenster">
+          <select className={inputCls} value={wartungsfensterId} onChange={(e) => setWartungsfensterId(Number(e.target.value))}>
+            {dropdownWf.map((w) => (
+              <option key={w.id} value={w.id}>
+                {wfFullLabel(w)}
+              </option>
+            ))}
+          </select>
+        </Field>
         <Field label="Betroffene Instanzen (1-n)">
           <div className="border border-slate-200 rounded-md p-3 max-h-48 overflow-y-auto space-y-1">
             {alleInstanzen.length === 0 && <p className="text-sm text-slate-400">Noch keine Instanzen angelegt.</p>}
@@ -1703,7 +1705,7 @@ function BugfixCreateModal({ activeWf, alleInstanzen, onClose, onSubmit }) {
           </div>
           {properties === "ja" && <p className="text-xs text-[#DC2626] mt-1">Die Spalte "Properties" wird rot markiert.</p>}
         </Field>
-        <p className="text-xs text-slate-400 mb-3">Gilt ausschließlich für {wfShortLabel(activeWf)} — keine automatische Übernahme in andere Wartungsfenster.</p>
+        <p className="text-xs text-slate-400 mb-3">Gilt ausschließlich für das gewählte Wartungsfenster — keine automatische Übernahme in andere.</p>
         <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
           <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
             Abbrechen
@@ -2111,7 +2113,7 @@ function EingespieltModal({ hasBugfix, hasBasis, onChoose, onClose }) {
    auf einmal) löschen
 --------------------------------------------------------- */
 
-function InstanzManagerModal({ servergruppen, onDeleteEverywhere, onClose }) {
+function InstanzManagerModal({ servergruppen, onDeleteEverywhere, onOpenNew, onClose }) {
   const map = new Map();
   Object.entries(servergruppen).forEach(([env, rows]) => {
     rows.forEach((sg) => {
@@ -2125,6 +2127,11 @@ function InstanzManagerModal({ servergruppen, onDeleteEverywhere, onClose }) {
 
   return (
     <Modal title="Instanzen verwalten" onClose={onClose} wide>
+      <div className="flex justify-end mb-3">
+        <button onClick={onOpenNew} className="px-3 py-2 text-sm bg-[#0F4C5C] text-white rounded-md hover:brightness-110 flex items-center gap-1.5">
+          <Plus size={14} /> Neue Instanz anlegen
+        </button>
+      </div>
       <p className="text-xs text-slate-500 mb-4">
         Zeigt jede Instanz mit den Umgebungen, in denen sie vorkommt. "Überall löschen" entfernt die Instanz aus <strong>allen</strong> Umgebungen auf einmal. Um nur eine einzelne
         Umgebung zu entfernen, den Lösch-Button direkt in der Tabellenzeile nutzen.
