@@ -34,14 +34,24 @@ export const api = {
   createServergruppen: (payload) => http("POST", "/servergruppen", payload),
   updateServergruppe: (id, payload) => http("PUT", `/servergruppen/${id}`, payload),
   deleteServergruppe: (id) => http("DELETE", `/servergruppen/${id}`),
-  bulkSetBasisaenderung: (payload) => http("PUT", "/servergruppen/basisaenderung", payload),
 
   // Wartungsfenster
   getWartungsfenster: () => http("GET", "/wartungsfenster"),
   createWartungsfenster: (payload) => http("POST", "/wartungsfenster", payload),
   deleteWartungsfenster: (id) => http("DELETE", `/wartungsfenster/${id}`),
 
-  // Bugfix-Zuordnungen (liegen an der Instanz, nicht an der Servergruppe)
-  getBugfixZuordnungen: () => http("GET", "/bugfix-zuordnungen"),
-  saveBugfix: (instanzId, wartungsfensterId, payload) => http("PUT", `/instanzen/${instanzId}/bugfix/${wartungsfensterId}`, payload),
+  // Basisänderung (pro Servergruppe UND Wartungsfenster)
+  getBasisaenderungen: () => http("GET", "/basisaenderungen"),
+  saveBasisaenderung: (servergruppeId, wartungsfensterId, payload) =>
+    http("PUT", `/servergruppen/${servergruppeId}/basisaenderung/${wartungsfensterId}`, payload),
+  bulkSetBasisaenderung: (wartungsfensterId, payload) => http("PUT", `/servergruppen/basisaenderung/${wartungsfensterId}`, payload),
+
+  // Bugfixe (gehören zu einem Wartungsfenster, können mehrere Instanzen umfassen)
+  getBugfixe: () => http("GET", "/bugfixe"),
+  createBugfix: (payload) => http("POST", "/bugfixe", payload),
+  updateBugfix: (bugfixId, payload) => http("PUT", `/bugfixe/${bugfixId}`, payload),
+  updateBugfixInstanz: (bugfixInstanzId, payload) => http("PUT", `/bugfixe/instanz/${bugfixInstanzId}`, payload),
+  deleteBugfixInstanz: (bugfixInstanzId) => http("DELETE", `/bugfixe/instanz/${bugfixInstanzId}`),
+  deleteBugfix: (bugfixId) => http("DELETE", `/bugfixe/${bugfixId}`),
+  moveBugfix: (bugfixId, zielWartungsfensterId) => http("PUT", `/bugfixe/${bugfixId}/verschieben/${zielWartungsfensterId}`),
 };

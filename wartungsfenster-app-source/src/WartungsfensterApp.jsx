@@ -18,6 +18,8 @@ import {
   Archive,
   Search,
   Cpu,
+  Copy,
+  Boxes,
 } from "lucide-react";
 
 /* ---------------------------------------------------------
@@ -80,8 +82,9 @@ const PALETTE = [
 ];
 
 const PROPERTIES_RED = "#DC2626";
-const EMPTY_ZUORDNUNG = { bugfixNr: "", bemerkung: "", properties: "nein", nexusLink: "", eingespielt: false, colors: {} };
 const NO_DOMAIN = "__none__";
+const EMPTY_ZU = { bugfixNr: "", nexusLink: "", properties: "nein", bemerkung: "", eingespielt: false, colors: {}, bugfixId: null, bugfixInstanzId: null };
+const EMPTY_BASIS = { jdkVersionAlt: "", jdkVersionNeu: "", jdkAufNeuerVersion: false, eapVersion: "", ojdbcVersion: "", eingespielt: false };
 
 const VIEW_TABS = [
   { key: "alle", label: "Alle Instanzen" },
@@ -92,18 +95,23 @@ const VIEW_TABS = [
 function hasBugfixEntry(zu) {
   return !!(zu.bugfixNr && zu.bugfixNr.trim());
 }
+function formatBf(nr) {
+  return nr && nr.trim() ? `BF ${nr.trim()}` : "";
+}
 function hasEinspielung(zu) {
   return zu.properties === "ja" || !!(zu.nexusLink && zu.nexusLink.trim()) || hasBugfixEntry(zu);
 }
-
-// Liefert die aktuell "geltende" JDK-Version einer Servergruppe: je nachdem, ob sie
-// laut Umschalter schon auf der neueren Version läuft oder noch auf der aktuellen.
-function effektiveJdkVersion(sg) {
-  return sg.jdkAufNeuerVersion ? sg.jdkVersionNeu : sg.jdkVersionAlt;
+function hasBasisaenderungEntry(basis) {
+  return !!((basis.jdkVersionAlt && basis.jdkVersionAlt.trim()) || (basis.jdkVersionNeu && basis.jdkVersionNeu.trim()) || (basis.eapVersion && basis.eapVersion.trim()) || (basis.ojdbcVersion && basis.ojdbcVersion.trim()));
 }
 
-function basisaenderungText(sg) {
-  const teile = [effektiveJdkVersion(sg), sg.eapVersion, sg.ojdbcVersion].filter((v) => v && v.trim());
+// Liefert die aktuell "geltende" JDK-Version: je nachdem, ob laut Umschalter schon auf
+// der neueren Version oder noch auf der aktuellen Version.
+function effektiveJdkVersion(basis) {
+  return basis.jdkAufNeuerVersion ? basis.jdkVersionNeu : basis.jdkVersionAlt;
+}
+function basisaenderungText(basis) {
+  const teile = [effektiveJdkVersion(basis), basis.eapVersion, basis.ojdbcVersion].filter((v) => v && v.trim());
   return teile.join(" · ");
 }
 
@@ -124,11 +132,6 @@ function wfShortLabel(wf) {
 function wfFullLabel(wf) {
   return wf ? `Wartungsfenster ${wf.nummer} (${wf.datum} · KW ${wf.kw} · ${wf.atlasRelease})` : "";
 }
-
-/* ---------------------------------------------------------
-   Datenermittlung erfolgt jetzt ausschließlich über die REST-API
-   (siehe src/api.js) — hier bleiben nur noch reine Hilfsfunktionen.
---------------------------------------------------------- */
 
 function getDefaultWfId(list) {
   const today = new Date().toISOString().slice(0, 10);
@@ -222,15 +225,25 @@ function DomainSelect({ domains, value, onChange }) {
   );
 }
 
-function EnvSelect({ value, onChange }) {
+function FastTooltip({ text, children }) {
+  const [show, setShow] = useState(false);
+  const timerRef = useRef(null);
+  function handleEnter() {
+    timerRef.current = setTimeout(() => setShow(true), 150);
+  }
+  function handleLeave() {
+    clearTimeout(timerRef.current);
+    setShow(false);
+  }
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value)} className={inputCls}>
-      {ALL_ENV_KEYS.map((k) => (
-        <option key={k} value={k}>
-          {k} — {ENV_META[k].full}
-        </option>
-      ))}
-    </select>
+    <div className="relative" onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
+      {children}
+      {show && (
+        <div className="absolute z-50 left-0 top-full mt-1 bg-slate-800 text-white text-[11px] rounded-md px-2.5 py-1.5 whitespace-pre-line shadow-lg max-w-xs pointer-events-none">
+          {text}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -279,42 +292,104 @@ export default function WartungsfensterApp() {
     return d;
   });
   const [wartungsfenster, setWartungsfenster] = useState([]);
-  const [zuordnungen, setZuordnungen] = useState({});
+  const [bugfixe, setBugfixe] = useState([]); // flache Liste, jedes Element inkl. .instanzen[]
+  const [basisaenderungen, setBasisaenderungen] = useState({}); // [wartungsfensterId][servergruppeId] = {...}
   const [activeWfId, setActiveWfId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const debounceTimers = useRef({});
 
-  function buildZuordnungen(servergruppenByEnv, bugfixRows) {
-    const allSg = Object.values(servergruppenByEnv).flat();
-    const z = {};
-    bugfixRows.forEach((row) => {
-      if (!z[row.wartungsfensterId]) z[row.wartungsfensterId] = {};
-      allSg
-        .filter((sg) => sg.instanzId === row.instanzId)
-        .forEach((sg) => {
-          z[row.wartungsfensterId][sg.id] = {
-            bugfixNr: row.bugfixNr || "",
-            bemerkung: row.bemerkung || "",
-            properties: row.properties || "nein",
-            nexusLink: row.nexusLink || "",
-            eingespielt: !!row.eingespielt,
-            colors: row.colors || {},
-          };
-        });
+  const [activeGroup, setActiveGroup] = useState("INT");
+  const [activeSub, setActiveSub] = useState("REFBIU");
+  const [viewTab, setViewTab] = useState("alle");
+  const [columnFilters, setColumnFilters] = useState({});
+
+  const [editBugfixFor, setEditBugfixFor] = useState(null); // { sg, zu }
+  const [editBasis, setEditBasis] = useState(null); // { env, sg }
+  const [historyFor, setHistoryFor] = useState(null); // { sg }
+  const [transferFor, setTransferFor] = useState(null); // { bugfixId }
+  const [deleteBugfixFor, setDeleteBugfixFor] = useState(null); // { sg, zu }
+  const [eingespieltFor, setEingespieltFor] = useState(null); // { sg, zu, basis }
+  const [showInstanzManagerModal, setShowInstanzManagerModal] = useState(false);
+  const [showNewSgModal, setShowNewSgModal] = useState(false);
+  const [showBugfixModal, setShowBugfixModal] = useState(false);
+  const [showNewWfModal, setShowNewWfModal] = useState(false);
+  const [showDomainModal, setShowDomainModal] = useState(false);
+  const [showBasisaenderungModal, setShowBasisaenderungModal] = useState(false);
+  const [showArchiveModal, setShowArchiveModal] = useState(false);
+
+  const activeEnv = activeGroup === "REF" ? activeSub : activeGroup;
+  const rows = servergruppen[activeEnv] || [];
+  const sortedWf = useMemo(() => [...wartungsfenster].sort((a, b) => a.datum.localeCompare(b.datum)), [wartungsfenster]);
+  const activeWf = wartungsfenster.find((w) => w.id === activeWfId);
+  const { visible: visibleWf, archived: archivedWf } = useMemo(() => splitWfVisibility(wartungsfenster), [wartungsfenster]);
+  const dropdownWf = visibleWf.some((w) => w.id === activeWfId) || !activeWf ? visibleWf : [...visibleWf, activeWf].sort((a, b) => a.datum.localeCompare(b.datum));
+
+  function buildBasisaenderungen(rowsByEnv, basisRows) {
+    const map = {};
+    basisRows.forEach((row) => {
+      if (!map[row.wartungsfensterId]) map[row.wartungsfensterId] = {};
+      map[row.wartungsfensterId][row.servergruppeId] = {
+        jdkVersionAlt: row.jdkVersionAlt || "",
+        jdkVersionNeu: row.jdkVersionNeu || "",
+        jdkAufNeuerVersion: !!row.jdkAufNeuerVersion,
+        eapVersion: row.eapVersion || "",
+        ojdbcVersion: row.ojdbcVersion || "",
+        eingespielt: !!row.eingespielt,
+      };
     });
-    return z;
+    return map;
+  }
+
+  // Basisänderung schreibt sich fort: gilt ab dem Fenster, in dem sie gesetzt wurde,
+  // auch für alle späteren Fenster, bis sie dort erneut geändert wird (Infrastruktur-
+  // Zustand wie JDK/EAP/OJDBC bleibt naturgemäß bestehen, bis er aktiv geändert wird).
+  function getEffectiveBasisaenderung(sgId, targetWfId) {
+    const targetIdx = sortedWf.findIndex((w) => w.id === targetWfId);
+    for (let i = targetIdx; i >= 0; i--) {
+      const wf = sortedWf[i];
+      const entry = basisaenderungen[wf.id]?.[sgId];
+      if (entry) return { ...entry, effectiveFromWf: wf, explicitHere: wf.id === targetWfId };
+    }
+    return { ...EMPTY_BASIS, effectiveFromWf: null, explicitHere: false };
+  }
+
+  // Bugfix gilt IMMER NUR für das Fenster, in dem er eingetragen wurde - keine
+  // Fortschreibung mehr. Direkter Lookup: welcher Bugfix (falls vorhanden) betrifft
+  // diese Instanz in genau diesem Fenster?
+  function findBugfixMatch(instanzId, wfId) {
+    for (const bf of bugfixe) {
+      if (bf.wartungsfensterId !== wfId) continue;
+      const bi = bf.instanzen.find((i) => i.instanzId === instanzId);
+      if (bi) return { bugfix: bf, bi };
+    }
+    return null;
+  }
+  function getZu(sg, wfId) {
+    const match = findBugfixMatch(sg.instanzId, wfId);
+    if (!match) return { ...EMPTY_ZU };
+    return {
+      bugfixNr: match.bugfix.bugfixNr || "",
+      nexusLink: match.bugfix.nexusLink || "",
+      properties: match.bi.properties || "nein",
+      bemerkung: match.bi.bemerkung || "",
+      eingespielt: !!match.bi.eingespielt,
+      colors: match.bi.colors || {},
+      bugfixId: match.bugfix.id,
+      bugfixInstanzId: match.bi.id,
+    };
   }
 
   async function ladeAllesVomServer() {
     setLoading(true);
     setLoadError(null);
     try {
-      const [domainsRes, sgRes, wfRes, bugfixRes] = await Promise.all([
+      const [domainsRes, sgRes, wfRes, basisRes, bugfixRes] = await Promise.all([
         api.getDomaenen(),
         api.getServergruppen(),
         api.getWartungsfenster(),
-        api.getBugfixZuordnungen(),
+        api.getBasisaenderungen(),
+        api.getBugfixe(),
       ]);
       const byEnv = {};
       ALL_ENV_KEYS.forEach((env) => (byEnv[env] = []));
@@ -324,7 +399,8 @@ export default function WartungsfensterApp() {
       setDomains(domainsRes);
       setServergruppen(byEnv);
       setWartungsfenster(wfRes);
-      setZuordnungen(buildZuordnungen(byEnv, bugfixRes));
+      setBasisaenderungen(buildBasisaenderungen(byEnv, basisRes));
+      setBugfixe(bugfixRes);
       setActiveWfId(getDefaultWfId(wfRes));
     } catch (e) {
       console.error(e);
@@ -344,84 +420,150 @@ export default function WartungsfensterApp() {
     debounceTimers.current[key] = setTimeout(fn, delay);
   }
 
-  const [activeGroup, setActiveGroup] = useState("INT");
-  const [activeSub, setActiveSub] = useState("REFBIU");
-  const [viewTab, setViewTab] = useState("alle");
-  const [columnFilters, setColumnFilters] = useState({});
+  /* ------------------- Bugfix: erfassen / bearbeiten / löschen / verschieben ------------------- */
 
-  const [editZuordnung, setEditZuordnung] = useState(null);
-  const [editBasis, setEditBasis] = useState(null);
-  const [historyFor, setHistoryFor] = useState(null);
-  const [showNewSgModal, setShowNewSgModal] = useState(false);
-  const [showBugfixModal, setShowBugfixModal] = useState(false);
-  const [showNewWfModal, setShowNewWfModal] = useState(false);
-  const [showDomainModal, setShowDomainModal] = useState(false);
-  const [showBasisaenderungModal, setShowBasisaenderungModal] = useState(false);
-  const [showArchiveModal, setShowArchiveModal] = useState(false);
-
-  const activeEnv = activeGroup === "REF" ? activeSub : activeGroup;
-  const rows = servergruppen[activeEnv] || [];
-  const sortedWf = useMemo(() => [...wartungsfenster].sort((a, b) => a.datum.localeCompare(b.datum)), [wartungsfenster]);
-  const activeWf = wartungsfenster.find((w) => w.id === activeWfId);
-  const { visible: visibleWf, archived: archivedWf } = useMemo(() => splitWfVisibility(wartungsfenster), [wartungsfenster]);
-  // Falls das aktive Fenster archiviert ist (z. B. gezielt aus dem Archiv geöffnet), trotzdem im Dropdown anzeigen.
-  const dropdownWf = visibleWf.some((w) => w.id === activeWfId) || !activeWf ? visibleWf : [...visibleWf, activeWf].sort((a, b) => a.datum.localeCompare(b.datum));
-  const nextWf = (() => {
-    const idx = sortedWf.findIndex((w) => w.id === activeWfId);
-    return idx >= 0 ? sortedWf[idx + 1] : undefined;
-  })();
-
-  function getEffectiveZuordnung(sgId, targetWfId) {
-    const targetIdx = sortedWf.findIndex((w) => w.id === targetWfId);
-    for (let i = targetIdx; i >= 0; i--) {
-      const wf = sortedWf[i];
-      const entry = zuordnungen[wf.id]?.[sgId];
-      if (entry) return { ...entry, effectiveFromWf: wf, explicitHere: wf.id === targetWfId };
+  async function createBugfix(payload) {
+    try {
+      const created = await api.createBugfix({ ...payload, wartungsfensterId: activeWfId });
+      setBugfixe((prev) => [...prev, created]);
+    } catch (e) {
+      console.error(e);
+      window.alert("Bugfix konnte nicht angelegt werden: " + e.message);
     }
-    return { ...EMPTY_ZUORDNUNG, effectiveFromWf: null, explicitHere: false };
   }
 
-  function saveZuordnungByName(sgId, wfId, data) {
-    const allSg = Object.values(servergruppen).flat();
-    const source = allSg.find((s) => s.id === sgId);
-    const targets = source && source.name && source.name.trim() ? allSg.filter((s) => s.name === source.name) : [source].filter(Boolean);
-    setZuordnungen((prev) => {
-      const next = { ...prev, [wfId]: { ...(prev[wfId] || {}) } };
-      targets.forEach((t) => {
-        next[wfId][t.id] = data;
+  function replaceBugfixInState(updated) {
+    setBugfixe((prev) => prev.map((bf) => (bf.id === updated.id ? updated : bf)));
+  }
+
+  async function saveBugfixHeader(bugfixId, headerPayload) {
+    const updated = await api.updateBugfix(bugfixId, headerPayload);
+    replaceBugfixInState(updated);
+  }
+
+  async function saveBugfixInstanzRow(bugfixInstanzId, bugfixId, rowPayload) {
+    await api.updateBugfixInstanz(bugfixInstanzId, rowPayload);
+    setBugfixe((prev) =>
+      prev.map((bf) => {
+        if (bf.id !== bugfixId) return bf;
+        return { ...bf, instanzen: bf.instanzen.map((bi) => (bi.id === bugfixInstanzId ? { ...bi, ...rowPayload } : bi)) };
+      })
+    );
+  }
+
+  // Konsolidiertes Markieren als "eingespielt" - kann Bugfix, Basisänderung oder beides
+  // betreffen, je nachdem was im Modal gewählt wurde. Bewusst ohne Sicherheitsabfrage,
+  // da die Auswahl im Modal selbst schon die bewusste Bestätigung ist.
+  async function markEingespielt(sg, zu, basis, wahl) {
+    try {
+      if ((wahl === "bugfix" || wahl === "beides") && zu.bugfixInstanzId) {
+        await saveBugfixInstanzRow(zu.bugfixInstanzId, zu.bugfixId, { properties: zu.properties, bemerkung: zu.bemerkung, eingespielt: true, colors: zu.colors });
+      }
+      if ((wahl === "basis" || wahl === "beides") && hasBasisaenderungEntry(basis)) {
+        await saveBasisaenderungRow(sg.id, activeWfId, { ...basis, eingespielt: true });
+      }
+    } catch (e) {
+      console.error(e);
+      window.alert("Konnte nicht gespeichert werden.");
+    }
+  }
+
+  function updateBemerkungInline(sg, value) {
+    const zu = getZu(sg, activeWfId);
+    if (!zu.bugfixInstanzId) return; // ohne bestehenden Bugfix gibt es hier nichts zu editieren
+    // Optimistisches lokales Update, damit Tippen nicht ruckelt
+    setBugfixe((prev) =>
+      prev.map((bf) => {
+        if (bf.id !== zu.bugfixId) return bf;
+        return { ...bf, instanzen: bf.instanzen.map((bi) => (bi.id === zu.bugfixInstanzId ? { ...bi, bemerkung: value } : bi)) };
+      })
+    );
+    debouncedPersist(`bemerkung-${zu.bugfixInstanzId}`, () => {
+      api.updateBugfixInstanz(zu.bugfixInstanzId, { properties: zu.properties, bemerkung: value, eingespielt: zu.eingespielt, colors: zu.colors }).catch((e) => console.error(e));
+    });
+  }
+
+  async function deleteBugfixInstanzRow(bugfixInstanzId) {
+    await api.deleteBugfixInstanz(bugfixInstanzId);
+    setBugfixe((prev) =>
+      prev
+        .map((bf) => ({ ...bf, instanzen: bf.instanzen.filter((bi) => bi.id !== bugfixInstanzId) }))
+        .filter((bf) => bf.instanzen.length > 0)
+    );
+  }
+
+  async function deleteWholeBugfix(bugfixId) {
+    await api.deleteBugfix(bugfixId);
+    setBugfixe((prev) => prev.filter((bf) => bf.id !== bugfixId));
+  }
+
+  async function moveBugfix(bugfixId, zielWfId) {
+    try {
+      const updated = await api.moveBugfix(bugfixId, zielWfId);
+      replaceBugfixInState(updated);
+    } catch (e) {
+      console.error(e);
+      window.alert("Bugfix konnte nicht verschoben werden.");
+    }
+  }
+
+  /* ------------------- Basisänderung ------------------- */
+
+  async function saveBasisaenderungRow(sgId, wfId, payload) {
+    const saved = await api.saveBasisaenderung(sgId, wfId, payload);
+    setBasisaenderungen((prev) => ({
+      ...prev,
+      [wfId]: { ...(prev[wfId] || {}), [sgId]: { jdkVersionAlt: saved.jdkVersionAlt, jdkVersionNeu: saved.jdkVersionNeu, jdkAufNeuerVersion: saved.jdkAufNeuerVersion, eapVersion: saved.eapVersion, ojdbcVersion: saved.ojdbcVersion, eingespielt: saved.eingespielt } },
+    }));
+  }
+
+  async function applyBasisaenderungToAll(payload) {
+    try {
+      const aktualisiert = await api.bulkSetBasisaenderung(activeWfId, payload);
+      setBasisaenderungen((prev) => {
+        const next = { ...prev, [activeWfId]: { ...(prev[activeWfId] || {}) } };
+        aktualisiert.forEach((row) => {
+          next[activeWfId][row.servergruppeId] = {
+            jdkVersionAlt: row.jdkVersionAlt,
+            jdkVersionNeu: row.jdkVersionNeu,
+            jdkAufNeuerVersion: row.jdkAufNeuerVersion,
+            eapVersion: row.eapVersion,
+            ojdbcVersion: row.ojdbcVersion,
+            eingespielt: row.eingespielt,
+          };
+        });
+        return next;
+      });
+    } catch (e) {
+      console.error(e);
+      window.alert("Basisänderung konnte nicht auf alle Instanzen angewendet werden. Ist das Backend erreichbar?");
+    }
+  }
+
+  /* ------------------- Domänen ------------------- */
+
+  async function addDomain(name) {
+    const created = await api.createDomaene(name);
+    setDomains((prev) => [...prev, created]);
+    return created.id;
+  }
+  async function renameDomain(id, name) {
+    await api.renameDomaene(id, name);
+    setDomains((prev) => prev.map((d) => (d.id === id ? { ...d, name } : d)));
+  }
+  async function deleteDomain(id) {
+    await api.deleteDomaene(id);
+    setDomains((prev) => prev.filter((d) => d.id !== id));
+    setServergruppen((prev) => {
+      const next = {};
+      Object.keys(prev).forEach((env) => {
+        next[env] = prev[env].map((sg) => (sg.domainId === id ? { ...sg, domainId: null } : sg));
       });
       return next;
     });
-    if (source?.instanzId && wfId) {
-      api.saveBugfix(source.instanzId, wfId, data).catch((e) => console.error("Bugfix konnte nicht gespeichert werden:", e));
-    }
   }
 
-  function toggleEingespielt(sgId) {
-    const current = getEffectiveZuordnung(sgId, activeWfId);
-    const msg = current.eingespielt ? "Markierung 'eingespielt' wirklich entfernen?" : "Wurde dieser Bugfix wirklich eingespielt?";
-    if (!window.confirm(msg)) return;
-    const { effectiveFromWf, explicitHere, ...data } = current;
-    saveZuordnungByName(sgId, activeWfId, { ...data, eingespielt: !current.eingespielt });
-  }
-
-  // Überträgt die aktuelle Bugfix-Zuordnung explizit in das nächste (chronologisch
-  // folgende) Wartungsfenster — z. B. wenn ein Bugfix in diesem Fenster nicht mehr
-  // eingespielt wurde und ins nächste Fenster verschoben werden soll.
-  function transferToNextWindow(sgId) {
-    if (!nextWf) return;
-    const current = getEffectiveZuordnung(sgId, activeWfId);
-    const { effectiveFromWf, explicitHere, ...data } = current;
-    saveZuordnungByName(sgId, nextWf.id, data);
-  }
-
-  function updateBemerkungInline(sgId, value) {
-    const current = getEffectiveZuordnung(sgId, activeWfId);
-    const { effectiveFromWf, explicitHere, ...data } = current;
-    const merged = { ...data, bemerkung: value };
-    setZuordnungen((prev) => ({ ...prev, [activeWfId]: { ...(prev[activeWfId] || {}), [sgId]: merged } }));
-    debouncedPersist(`bemerkung-${sgId}`, () => saveZuordnungByName(sgId, activeWfId, merged));
-  }
+  /* ------------------- Servergruppen / Instanzen ------------------- */
 
   function saveBasis(env, updatedSg) {
     setServergruppen((prev) => ({
@@ -451,6 +593,7 @@ export default function WartungsfensterApp() {
         aufrufadresse: sgData.aufrufadresse,
         soaEndpunkte: sgData.soaEndpunkte,
         artefaktVorlagen: sgData.artefaktVorlagen,
+        jdkAufNeuerVersion: sgData.jdkAufNeuerVersion,
       });
       setServergruppen((prev) => {
         const next = { ...prev };
@@ -459,18 +602,33 @@ export default function WartungsfensterApp() {
         });
         return next;
       });
+      // Basisänderung neu laden, da das Backend beim Anlegen automatisch einen Eintrag übernimmt
+      const basisRes = await api.getBasisaenderungen();
+      setBasisaenderungen((prevMap) => buildBasisaenderungen(null, basisRes));
     } catch (e) {
       console.error(e);
       window.alert("Instanz konnte nicht angelegt werden. Ist das Backend erreichbar?");
     }
   }
 
+  async function deleteServergruppe(env, sgId) {
+    const sg = servergruppen[env]?.find((s) => s.id === sgId);
+    if (!window.confirm(`${sg?.name || "Diese Instanz"} in ${env} wirklich löschen?`)) return;
+    try {
+      await api.deleteServergruppe(sgId);
+      setServergruppen((prev) => ({ ...prev, [env]: prev[env].filter((s) => s.id !== sgId) }));
+    } catch (e) {
+      console.error(e);
+      window.alert("Instanz konnte nicht gelöscht werden.");
+    }
+  }
+
+  /* ------------------- Wartungsfenster ------------------- */
+
   async function addWartungsfenster({ datum, atlasRelease, nummer }) {
     try {
       const wf = await api.createWartungsfenster({ datum, atlasRelease, nummer });
       setWartungsfenster((prev) => [...prev, wf]);
-      const bugfixRows = await api.getBugfixZuordnungen();
-      setZuordnungen(buildZuordnungen(servergruppen, bugfixRows));
       setActiveWfId(wf.id);
     } catch (e) {
       console.error(e);
@@ -480,11 +638,12 @@ export default function WartungsfensterApp() {
 
   async function deleteWartungsfenster(id) {
     const wf = wartungsfenster.find((w) => w.id === id);
-    if (!window.confirm(`${wfShortLabel(wf)} wirklich unwiderruflich löschen? Alle darin erfassten Bugfix-Angaben gehen verloren.`)) return;
+    if (!window.confirm(`${wfShortLabel(wf)} wirklich unwiderruflich löschen? Alle darin erfassten Bugfixe und Basisänderungen gehen verloren.`)) return;
     try {
       await api.deleteWartungsfenster(id);
       setWartungsfenster((prev) => prev.filter((w) => w.id !== id));
-      setZuordnungen((prev) => {
+      setBugfixe((prev) => prev.filter((bf) => bf.wartungsfensterId !== id));
+      setBasisaenderungen((prev) => {
         const next = { ...prev };
         delete next[id];
         return next;
@@ -499,63 +658,7 @@ export default function WartungsfensterApp() {
     }
   }
 
-  async function deleteServergruppe(env, sgId) {
-    const sg = servergruppen[env]?.find((s) => s.id === sgId);
-    if (!window.confirm(`${sg?.name || "Diese Instanz"} in ${env} wirklich löschen?`)) return;
-    try {
-      await api.deleteServergruppe(sgId);
-      setServergruppen((prev) => ({ ...prev, [env]: prev[env].filter((s) => s.id !== sgId) }));
-      setZuordnungen((prev) => {
-        const next = {};
-        Object.keys(prev).forEach((wfId) => {
-          const { [sgId]: _entfernt, ...rest } = prev[wfId];
-          next[wfId] = rest;
-        });
-        return next;
-      });
-    } catch (e) {
-      console.error(e);
-      window.alert("Instanz konnte nicht gelöscht werden.");
-    }
-  }
-
-  async function applyBasisaenderungToAll(payload) {
-    try {
-      const aktualisiert = await api.bulkSetBasisaenderung(payload);
-      const byId = new Map(aktualisiert.map((sg) => [sg.id, sg]));
-      setServergruppen((prev) => {
-        const next = {};
-        Object.keys(prev).forEach((env) => {
-          next[env] = prev[env].map((sg) => byId.get(sg.id) || sg);
-        });
-        return next;
-      });
-    } catch (e) {
-      console.error(e);
-      window.alert("Basisänderung konnte nicht auf alle Instanzen angewendet werden. Ist das Backend erreichbar?");
-    }
-  }
-
-  async function addDomain(name) {
-    const created = await api.createDomaene(name);
-    setDomains((prev) => [...prev, created]);
-    return created.id;
-  }
-  async function renameDomain(id, name) {
-    await api.renameDomaene(id, name);
-    setDomains((prev) => prev.map((d) => (d.id === id ? { ...d, name } : d)));
-  }
-  async function deleteDomain(id) {
-    await api.deleteDomaene(id);
-    setDomains((prev) => prev.filter((d) => d.id !== id));
-    setServergruppen((prev) => {
-      const next = {};
-      Object.keys(prev).forEach((env) => {
-        next[env] = prev[env].map((sg) => (sg.domainId === id ? { ...sg, domainId: null } : sg));
-      });
-      return next;
-    });
-  }
+  /* ------------------- Darstellung ------------------- */
 
   function cellStyleStamm(key, sg) {
     const p = PALETTE.find((p) => p.key === sg.colors?.[key]);
@@ -578,15 +681,17 @@ export default function WartungsfensterApp() {
   });
 
   function columnValue(c, sg, zu) {
+    if (c.key === "basisaenderung") return basisaenderungText(getEffectiveBasisaenderung(sg.id, activeWfId));
     if (c.group === "stamm") return sg[c.key] || "";
     if (c.key === "properties") return zu.properties === "ja" ? "JA" : "NEIN";
+    if (c.key === "bugfixNr") return formatBf(zu.bugfixNr);
     return zu[c.key] || "";
   }
 
   const activeFilterCount = Object.values(columnFilters).filter((v) => v && v.trim()).length;
 
   const filteredRows = rows.filter((sg) => {
-    const zu = getEffectiveZuordnung(sg.id, activeWfId);
+    const zu = getZu(sg, activeWfId);
     if (viewTab === "einspielung" && !hasEinspielung(zu)) return false;
     if (viewTab === "eingespielt" && !zu.eingespielt) return false;
     return COLUMNS.every((c) => {
@@ -598,8 +703,8 @@ export default function WartungsfensterApp() {
 
   const counts = {
     alle: rows.length,
-    einspielung: rows.filter((sg) => hasEinspielung(getEffectiveZuordnung(sg.id, activeWfId))).length,
-    eingespielt: rows.filter((sg) => getEffectiveZuordnung(sg.id, activeWfId).eingespielt).length,
+    einspielung: rows.filter((sg) => hasEinspielung(getZu(sg, activeWfId))).length,
+    eingespielt: rows.filter((sg) => getZu(sg, activeWfId).eingespielt).length,
   };
 
   const domainGroups = useMemo(() => {
@@ -610,20 +715,34 @@ export default function WartungsfensterApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filteredRows, domains]);
 
+  // Alle bekannten Instanzen (Name + ID), global über alle Umgebungen hinweg - für die
+  // Mehrfachauswahl beim Anlegen eines Bugfix.
+  const alleInstanzen = useMemo(() => {
+    const seen = new Map();
+    Object.values(servergruppen)
+      .flat()
+      .forEach((sg) => {
+        if (sg.instanzId && !seen.has(sg.instanzId)) seen.set(sg.instanzId, { id: sg.instanzId, name: sg.name });
+      });
+    return Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [servergruppen]);
+
   function exportToExcel() {
     const headerRow = ["Domäne", ...COLUMNS.map((c) => c.label), "Eingespielt"];
     const dataRows = domainGroups.flatMap((group) =>
       group.rows.map((sg) => {
-        const zu = getEffectiveZuordnung(sg.id, activeWfId);
+        const zu = getZu(sg, activeWfId);
         return [
           group.name,
           ...COLUMNS.map((c) => {
             if (c.key === "basisaenderung") {
-              const text = basisaenderungText(sg);
-              return text ? `${text}${sg.basisaenderungEingespielt ? " (eingespielt)" : ""}` : "";
+              const basis = getEffectiveBasisaenderung(sg.id, activeWfId);
+              const text = basisaenderungText(basis);
+              return text ? `${text}${basis.eingespielt ? " (eingespielt)" : ""}` : "";
             }
             if (c.group === "stamm") return sg[c.key] || "";
             if (c.key === "properties") return zu.properties === "ja" ? "JA" : "NEIN";
+            if (c.key === "bugfixNr") return formatBf(zu.bugfixNr);
             return zu[c.key] || "";
           }),
           zu.eingespielt ? "JA" : "NEIN",
@@ -638,9 +757,7 @@ export default function WartungsfensterApp() {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-800">
-      {loading && (
-        <div className="bg-slate-100 text-slate-500 text-sm text-center py-2 border-b border-slate-200">Daten werden vom Server geladen…</div>
-      )}
+      {loading && <div className="bg-slate-100 text-slate-500 text-sm text-center py-2 border-b border-slate-200">Daten werden vom Server geladen…</div>}
       {loadError && (
         <div className="bg-red-50 text-[#DC2626] text-sm text-center py-2 border-b border-red-200 flex items-center justify-center gap-3">
           {loadError}
@@ -649,6 +766,7 @@ export default function WartungsfensterApp() {
           </button>
         </div>
       )}
+
       <header className="bg-[#0F4C5C] text-white px-6 py-4 flex items-center justify-between shadow-sm flex-wrap gap-3">
         <div className="flex items-center gap-3">
           <ServerCog size={22} />
@@ -658,28 +776,19 @@ export default function WartungsfensterApp() {
           </div>
         </div>
         <div className="flex gap-2 flex-wrap items-center">
-          <button
-            onClick={() => setShowDomainModal(true)}
-            className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition"
-          >
+          <button onClick={() => setShowDomainModal(true)} className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition">
             <Layers size={16} /> Domänen verwalten
           </button>
-          <button
-            onClick={() => setShowBasisaenderungModal(true)}
-            className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition"
-          >
+          <button onClick={() => setShowBasisaenderungModal(true)} className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition">
             <Cpu size={16} /> Basisänderung erfassen
           </button>
-          <button
-            onClick={() => setShowNewSgModal(true)}
-            className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition"
-          >
+          <button onClick={() => setShowNewSgModal(true)} className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition">
             <Plus size={16} /> Instanz
           </button>
-          <button
-            onClick={() => setShowBugfixModal(true)}
-            className="bg-[#F2A541] hover:brightness-95 text-[#0F4C5C] font-medium text-sm px-3 py-2 rounded-md flex items-center gap-2 transition"
-          >
+          <button onClick={() => setShowInstanzManagerModal(true)} className="bg-white/10 hover:bg-white/20 border border-white/30 text-white text-sm px-3 py-2 rounded-md flex items-center gap-2 transition" title="Instanzen komplett (in allen Umgebungen) löschen">
+            <Boxes size={16} /> Instanzen verwalten
+          </button>
+          <button onClick={() => setShowBugfixModal(true)} className="bg-[#F2A541] hover:brightness-95 text-[#0F4C5C] font-medium text-sm px-3 py-2 rounded-md flex items-center gap-2 transition">
             <Plus size={16} /> Bugfix erfassen
           </button>
         </div>
@@ -706,15 +815,12 @@ export default function WartungsfensterApp() {
           })}
         </div>
         <div className="flex items-center gap-2 py-2">
-          <button
-            onClick={exportToExcel}
-            className="text-xs text-slate-600 border border-slate-300 hover:bg-slate-50 px-2.5 py-1.5 rounded-md flex items-center gap-1.5 transition"
-          >
+          <button onClick={exportToExcel} className="text-xs text-slate-600 border border-slate-300 hover:bg-slate-50 px-2.5 py-1.5 rounded-md flex items-center gap-1.5 transition">
             <Download size={13} /> Export zu Excel
           </button>
           <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-md px-2 py-1.5">
             <CalendarClock size={15} className="text-slate-500" />
-            <select value={activeWfId} onChange={(e) => setActiveWfId(e.target.value)} className="bg-transparent text-sm outline-none text-slate-700">
+            <select value={activeWfId} onChange={(e) => setActiveWfId(Number(e.target.value))} className="bg-transparent text-sm outline-none text-slate-700">
               {dropdownWf.map((wf) => (
                 <option key={wf.id} value={wf.id}>
                   {wfFullLabel(wf)}
@@ -727,18 +833,11 @@ export default function WartungsfensterApp() {
               </button>
             )}
           </div>
-          <button
-            onClick={() => setShowNewWfModal(true)}
-            className="text-xs text-[#0F4C5C] border border-[#0F4C5C]/30 hover:bg-[#0F4C5C]/5 px-2 py-1.5 rounded-md flex items-center gap-1 transition"
-          >
+          <button onClick={() => setShowNewWfModal(true)} className="text-xs text-[#0F4C5C] border border-[#0F4C5C]/30 hover:bg-[#0F4C5C]/5 px-2 py-1.5 rounded-md flex items-center gap-1 transition">
             <Plus size={13} /> Wartungsfenster
           </button>
           {archivedWf.length > 0 && (
-            <button
-              onClick={() => setShowArchiveModal(true)}
-              className="text-xs text-slate-500 border border-slate-300 hover:bg-slate-50 px-2 py-1.5 rounded-md flex items-center gap-1 transition"
-              title="Ältere Wartungsfenster ansehen"
-            >
+            <button onClick={() => setShowArchiveModal(true)} className="text-xs text-slate-500 border border-slate-300 hover:bg-slate-50 px-2 py-1.5 rounded-md flex items-center gap-1 transition" title="Ältere Wartungsfenster ansehen">
               <Archive size={13} /> Archiv ({archivedWf.length})
             </button>
           )}
@@ -822,16 +921,11 @@ export default function WartungsfensterApp() {
             </tr>
             <tr>
               {COLUMNS.map((c) => (
-                <th
-                  key={c.key}
-                  className={`sticky top-0 text-left px-3 py-2 font-semibold text-slate-600 border-b border-slate-200 whitespace-nowrap ${
-                    c.group === "bugfix" ? "bg-amber-50" : "bg-slate-100"
-                  }`}
-                >
+                <th key={c.key} className={`sticky top-0 text-left px-3 py-2 font-semibold text-slate-600 border-b border-slate-200 whitespace-nowrap ${c.group === "bugfix" ? "bg-amber-50" : "bg-slate-100"}`}>
                   {c.label}
                 </th>
               ))}
-              <th className="sticky top-0 bg-slate-100 px-3 py-2 border-b border-slate-200 text-center w-52">Aktionen</th>
+              <th className="sticky top-0 bg-slate-100 px-3 py-2 border-b border-slate-200 text-center w-56">Aktionen</th>
             </tr>
             <tr>
               {COLUMNS.map((c) => (
@@ -867,7 +961,8 @@ export default function WartungsfensterApp() {
                   </td>
                 </tr>
                 {group.rows.map((sg, idx) => {
-                  const zu = getEffectiveZuordnung(sg.id, activeWfId);
+                  const zu = getZu(sg, activeWfId);
+                  const basis = getEffectiveBasisaenderung(sg.id, activeWfId);
                   const statusClass = zu.eingespielt
                     ? "bg-green-50 border-l-4 border-green-500"
                     : hasBugfixEntry(zu)
@@ -878,7 +973,7 @@ export default function WartungsfensterApp() {
                       {COLUMNS.map((c) => {
                         if (c.key === "jbossAdmin") {
                           return (
-                            <td key={c.key} style={cellStyleStamm(c.key, sg)} className={`px-1 py-1 border-b border-slate-100 ${c.width || "max-w-[200px]"}`}>
+                            <td key={c.key} style={cellStyleStamm(c.key, sg)} className="px-1 py-1 border-b border-slate-100 max-w-[110px]">
                               <input
                                 value={sg.jbossAdmin}
                                 onChange={(e) => updateBasisField(activeEnv, sg.id, "jbossAdmin", e.target.value)}
@@ -890,18 +985,20 @@ export default function WartungsfensterApp() {
                         }
                         if (c.key === "name") {
                           const vorlagen = sg.artefaktVorlagen && sg.artefaktVorlagen.filter((v) => v && v.trim());
-                          const tooltip =
-                            vorlagen && vorlagen.length > 0
-                              ? `Artefakt-Vorlage(n):\n${vorlagen.map((v) => `• ${v}`).join("\n")}`
-                              : "Keine Artefakt-Vorlage hinterlegt";
+                          const tooltip = vorlagen && vorlagen.length > 0 ? `Artefakt-Vorlage(n):\n${vorlagen.map((v) => `• ${v}`).join("\n")}` : "Keine Artefakt-Vorlage hinterlegt";
                           return (
-                            <td
-                              key={c.key}
-                              style={cellStyleStamm(c.key, sg)}
-                              title={tooltip}
-                              className="px-3 py-2 border-b border-slate-100 max-w-[200px] truncate cursor-help"
-                            >
-                              {sg.name || <span className="text-slate-300">—</span>}
+                            <td key={c.key} style={cellStyleStamm(c.key, sg)} className="px-3 py-2 border-b border-slate-100 max-w-[200px]">
+                              <FastTooltip text={tooltip}>
+                                <span className="block truncate cursor-help">{sg.name || <span className="text-slate-300">—</span>}</span>
+                              </FastTooltip>
+                            </td>
+                          );
+                        }
+                        if (c.key === "basisaenderung") {
+                          const text = basisaenderungText(basis);
+                          return (
+                            <td key={c.key} className={`px-3 py-2 border-b border-slate-100 max-w-[200px] truncate ${basis.eingespielt ? "bg-green-50 text-green-700 font-medium" : ""}`}>
+                              {text || <span className="text-slate-300">—</span>}
                             </td>
                           );
                         }
@@ -918,19 +1015,6 @@ export default function WartungsfensterApp() {
                             </td>
                           );
                         }
-                        if (c.key === "basisaenderung") {
-                          const text = basisaenderungText(sg);
-                          return (
-                            <td
-                              key={c.key}
-                              className={`px-3 py-2 border-b border-slate-100 max-w-[200px] truncate ${
-                                sg.basisaenderungEingespielt ? "bg-green-50 text-green-700 font-medium" : ""
-                              }`}
-                            >
-                              {text || <span className="text-slate-300">—</span>}
-                            </td>
-                          );
-                        }
                         if (c.group === "stamm") {
                           return (
                             <td key={c.key} style={cellStyleStamm(c.key, sg)} className={`px-3 py-2 border-b border-slate-100 ${c.width || "max-w-[200px]"} truncate ${c.mono ? "font-mono text-[11px]" : ""}`}>
@@ -941,65 +1025,84 @@ export default function WartungsfensterApp() {
                         if (c.key === "bemerkung") {
                           return (
                             <td key={c.key} style={cellStyleBugfix(c.key, zu)} className="px-1 py-1 border-b border-slate-100 max-w-[200px]">
-                              <input
-                                value={zu.bemerkung}
-                                onChange={(e) => updateBemerkungInline(sg.id, e.target.value)}
-                                placeholder="Bemerkung eintragen…"
-                                className="w-full bg-transparent px-2 py-1.5 text-xs rounded-md outline-none hover:bg-slate-100/70 focus:bg-white focus:ring-1 focus:ring-[#0F4C5C]"
-                              />
+                              {zu.bugfixInstanzId ? (
+                                <input
+                                  value={zu.bemerkung}
+                                  onChange={(e) => updateBemerkungInline(sg, e.target.value)}
+                                  placeholder="Bemerkung eintragen…"
+                                  className="w-full bg-transparent px-2 py-1.5 text-xs rounded-md outline-none hover:bg-slate-100/70 focus:bg-white focus:ring-1 focus:ring-[#0F4C5C]"
+                                />
+                              ) : (
+                                <span className="px-2 text-slate-300">—</span>
+                              )}
+                            </td>
+                          );
+                        }
+                        if (c.key === "bugfixNr") {
+                          return (
+                            <td key={c.key} style={cellStyleBugfix(c.key, zu)} className={`px-3 py-2 border-b border-slate-100 ${c.width || "max-w-[200px]"} truncate font-mono text-[11px]`}>
+                              {formatBf(zu.bugfixNr) || <span className="text-slate-300">—</span>}
+                            </td>
+                          );
+                        }
+                        if (c.key === "nexusLink") {
+                          return (
+                            <td key={c.key} style={cellStyleBugfix(c.key, zu)} className={`px-3 py-2 border-b border-slate-100 ${c.width || "max-w-[300px]"}`}>
+                              {zu.nexusLink ? (
+                                <div className="flex items-start gap-1.5">
+                                  <span className="font-mono text-[11px] whitespace-normal break-all">{zu.nexusLink}</span>
+                                  <button type="button" onClick={() => navigator.clipboard?.writeText(zu.nexusLink)} title="Link kopieren" className="shrink-0 text-slate-300 hover:text-[#0F4C5C] transition mt-0.5">
+                                    <Copy size={12} />
+                                  </button>
+                                </div>
+                              ) : (
+                                <span className="text-slate-300">—</span>
+                              )}
                             </td>
                           );
                         }
                         return (
-                          <td
-                            key={c.key}
-                            style={cellStyleBugfix(c.key, zu)}
-                            title={zu.effectiveFromWf && !zu.explicitHere ? `Übernommen aus ${wfShortLabel(zu.effectiveFromWf)}` : undefined}
-                            className={`px-3 py-2 border-b border-slate-100 ${c.width || "max-w-[200px]"} truncate ${c.mono ? "font-mono text-[11px]" : ""}`}
-                          >
+                          <td key={c.key} style={cellStyleBugfix(c.key, zu)} className={`px-3 py-2 border-b border-slate-100 ${c.width || "max-w-[200px]"} truncate ${c.mono ? "font-mono text-[11px]" : ""}`}>
                             {c.key === "properties" ? (zu.properties === "ja" ? "JA" : "NEIN") : zu[c.key] || <span className="text-slate-300">—</span>}
                           </td>
                         );
                       })}
                       <td className="px-3 py-2 border-b border-slate-100">
                         <div className="flex items-center justify-center gap-2 flex-wrap">
-                          <button onClick={() => setEditZuordnung({ env: activeEnv, sg })} title="Bugfix für dieses Wartungsfenster bearbeiten" className="text-slate-400 hover:text-[#0F4C5C] transition">
+                          <button
+                            onClick={() => zu.bugfixInstanzId && setEditBugfixFor({ sg, zu })}
+                            disabled={!zu.bugfixInstanzId}
+                            title={zu.bugfixInstanzId ? "Bugfix bearbeiten" : "Noch kein Bugfix erfasst"}
+                            className={zu.bugfixInstanzId ? "text-slate-400 hover:text-[#0F4C5C] transition" : "text-slate-200 cursor-not-allowed"}
+                          >
                             <Pencil size={14} />
                           </button>
-                          <button onClick={() => setHistoryFor({ env: activeEnv, sg })} title="Verlauf anzeigen" className="text-slate-400 hover:text-[#0F4C5C] transition">
+                          <button onClick={() => setHistoryFor({ sg })} title="Verlauf anzeigen" className="text-slate-400 hover:text-[#0F4C5C] transition">
                             <History size={14} />
                           </button>
                           <button onClick={() => setEditBasis({ env: activeEnv, sg })} title="Stammdaten bearbeiten" className="text-slate-400 hover:text-[#0F4C5C] transition">
                             <Settings2 size={14} />
                           </button>
                           <button
-                            onClick={() => transferToNextWindow(sg.id)}
-                            disabled={!hasBugfixEntry(zu) || !nextWf}
-                            title={
-                              !hasBugfixEntry(zu)
-                                ? "Kein Bugfix zum Übertragen vorhanden"
-                                : !nextWf
-                                ? "Kein nächstes Wartungsfenster vorhanden"
-                                : `In ${wfShortLabel(nextWf)} übertragen`
-                            }
-                            className={`transition ${!hasBugfixEntry(zu) || !nextWf ? "text-slate-200 cursor-not-allowed" : "text-slate-400 hover:text-[#0F4C5C]"}`}
+                            onClick={() => zu.bugfixId && setTransferFor({ bugfixId: zu.bugfixId, sg })}
+                            disabled={!zu.bugfixId || wartungsfenster.length < 2}
+                            title={!zu.bugfixId ? "Kein Bugfix zum Übertragen vorhanden" : "Bugfix in anderes Wartungsfenster übertragen"}
+                            className={`transition ${!zu.bugfixId || wartungsfenster.length < 2 ? "text-slate-200 cursor-not-allowed" : "text-slate-400 hover:text-[#0F4C5C]"}`}
                           >
                             <ArrowRightCircle size={14} />
                           </button>
                           <button
-                            onClick={() => toggleEingespielt(sg.id)}
-                            disabled={!hasBugfixEntry(zu)}
+                            onClick={() => (zu.bugfixInstanzId || hasBasisaenderungEntry(basis)) && setEingespieltFor({ sg, zu, basis })}
+                            disabled={!zu.bugfixInstanzId && !hasBasisaenderungEntry(basis)}
                             title={
-                              !hasBugfixEntry(zu)
-                                ? "Erst möglich, wenn ein Bugfix eingetragen ist"
-                                : zu.eingespielt
-                                ? "Markierung 'eingespielt' entfernen"
+                              !zu.bugfixInstanzId && !hasBasisaenderungEntry(basis)
+                                ? "Erst möglich, wenn ein Bugfix oder eine Basisänderung eingetragen ist"
                                 : "Als eingespielt markieren"
                             }
                             className={`text-[10px] font-semibold px-2 py-1 rounded-full border transition flex items-center gap-1 ${
-                              !hasBugfixEntry(zu)
+                              !zu.bugfixInstanzId && !hasBasisaenderungEntry(basis)
                                 ? "bg-slate-50 border-slate-200 text-slate-300 cursor-not-allowed"
-                                : zu.eingespielt
+                                : (!zu.bugfixInstanzId || zu.eingespielt) && (!hasBasisaenderungEntry(basis) || basis.eingespielt)
                                 ? "bg-green-600 border-green-600 text-white"
                                 : "bg-white border-slate-300 text-slate-500 hover:border-green-400"
                             }`}
@@ -1007,8 +1110,16 @@ export default function WartungsfensterApp() {
                             <CheckCircle2 size={11} />
                             Eingespielt
                           </button>
+                          <button
+                            onClick={() => zu.bugfixInstanzId && setDeleteBugfixFor({ sg, zu })}
+                            disabled={!zu.bugfixInstanzId}
+                            title={zu.bugfixInstanzId ? "Bugfix löschen" : "Kein Bugfix vorhanden"}
+                            className={zu.bugfixInstanzId ? "text-slate-300 hover:text-[#DC2626] transition" : "text-slate-200 cursor-not-allowed"}
+                          >
+                            <Trash2 size={13} />
+                          </button>
                           <button onClick={() => deleteServergruppe(activeEnv, sg.id)} title="Diese Instanz in dieser Umgebung löschen" className="text-slate-300 hover:text-[#DC2626] transition">
-                            <Trash2 size={14} />
+                            <X size={14} />
                           </button>
                         </div>
                       </td>
@@ -1028,15 +1139,21 @@ export default function WartungsfensterApp() {
         </table>
       </div>
 
-      {editZuordnung && (
-        <ZuordnungModal
-          sg={editZuordnung.sg}
-          wf={activeWf}
-          initial={getEffectiveZuordnung(editZuordnung.sg.id, activeWfId)}
-          onClose={() => setEditZuordnung(null)}
-          onSave={(data) => {
-            saveZuordnungByName(editZuordnung.sg.id, activeWfId, data);
-            setEditZuordnung(null);
+      {editBugfixFor && (
+        <BugfixEditModal
+          sg={editBugfixFor.sg}
+          zu={editBugfixFor.zu}
+          activeWf={activeWf}
+          onClose={() => setEditBugfixFor(null)}
+          onSave={async (headerPayload, rowPayload) => {
+            try {
+              await saveBugfixHeader(editBugfixFor.zu.bugfixId, headerPayload);
+              await saveBugfixInstanzRow(editBugfixFor.zu.bugfixInstanzId, editBugfixFor.zu.bugfixId, rowPayload);
+              setEditBugfixFor(null);
+            } catch (e) {
+              console.error(e);
+              window.alert("Änderungen konnten nicht gespeichert werden.");
+            }
           }}
         />
       )}
@@ -1046,16 +1163,99 @@ export default function WartungsfensterApp() {
           env={editBasis.env}
           sg={editBasis.sg}
           domains={domains}
+          activeWf={activeWf}
+          initialBasis={getEffectiveBasisaenderung(editBasis.sg.id, activeWfId)}
           onClose={() => setEditBasis(null)}
-          onSave={(updated) => {
+          onSave={async (updated, basisPayload) => {
             saveBasis(editBasis.env, updated);
+            try {
+              await saveBasisaenderungRow(editBasis.sg.id, activeWfId, basisPayload);
+            } catch (e) {
+              console.error(e);
+            }
             setEditBasis(null);
           }}
         />
       )}
 
-      {historyFor && (
-        <HistoryModal sg={historyFor.sg} sortedWf={sortedWf} getEffectiveZuordnung={getEffectiveZuordnung} onClose={() => setHistoryFor(null)} />
+      {historyFor && <HistoryModal sg={historyFor.sg} sortedWf={sortedWf} bugfixe={bugfixe} onClose={() => setHistoryFor(null)} />}
+
+      {transferFor && (
+        <TransferModal
+          sg={transferFor.sg}
+          activeWf={activeWf}
+          sortedWf={sortedWf}
+          onTransfer={async (zielWfId) => {
+            await moveBugfix(transferFor.bugfixId, zielWfId);
+            setTransferFor(null);
+          }}
+          onClose={() => setTransferFor(null)}
+        />
+      )}
+
+      {deleteBugfixFor && (
+        <DeleteBugfixModal
+          sg={deleteBugfixFor.sg}
+          zu={deleteBugfixFor.zu}
+          onDeleteRow={async () => {
+            await deleteBugfixInstanzRow(deleteBugfixFor.zu.bugfixInstanzId);
+            setDeleteBugfixFor(null);
+          }}
+          onDeleteAll={async () => {
+            await deleteWholeBugfix(deleteBugfixFor.zu.bugfixId);
+            setDeleteBugfixFor(null);
+          }}
+          onClose={() => setDeleteBugfixFor(null)}
+        />
+      )}
+
+      {eingespieltFor && (
+        <EingespieltModal
+          hasBugfix={!!eingespieltFor.zu.bugfixInstanzId}
+          hasBasis={hasBasisaenderungEntry(eingespieltFor.basis)}
+          onChoose={async (wahl) => {
+            await markEingespielt(eingespieltFor.sg, eingespieltFor.zu, eingespieltFor.basis, wahl);
+            setEingespieltFor(null);
+          }}
+          onClose={() => setEingespieltFor(null)}
+        />
+      )}
+
+      {showInstanzManagerModal && (
+        <InstanzManagerModal
+          servergruppen={servergruppen}
+          onDeleteEverywhere={async (name) => {
+            if (!window.confirm(`Instanz "${name}" wirklich in ALLEN Umgebungen löschen?`)) return;
+            const targets = [];
+            Object.entries(servergruppen).forEach(([env, rows]) => rows.forEach((sg) => sg.name === name && targets.push({ env, id: sg.id })));
+            try {
+              await Promise.all(targets.map((t) => api.deleteServergruppe(t.id)));
+              setServergruppen((prev) => {
+                const next = { ...prev };
+                targets.forEach((t) => {
+                  next[t.env] = next[t.env].filter((sg) => sg.id !== t.id);
+                });
+                return next;
+              });
+            } catch (e) {
+              console.error(e);
+              window.alert("Instanz konnte nicht überall gelöscht werden.");
+            }
+          }}
+          onClose={() => setShowInstanzManagerModal(false)}
+        />
+      )}
+
+      {showArchiveModal && (
+        <ArchiveModal
+          archivedWf={archivedWf}
+          onSelect={(id) => {
+            setActiveWfId(id);
+            setShowArchiveModal(false);
+          }}
+          onDelete={deleteWartungsfenster}
+          onClose={() => setShowArchiveModal(false)}
+        />
       )}
 
       {showNewSgModal && (
@@ -1072,13 +1272,13 @@ export default function WartungsfensterApp() {
       )}
 
       {showBugfixModal && (
-        <BugfixQuickModal
-          defaultEnv={activeEnv}
-          servergruppen={servergruppen}
-          wf={activeWf}
+        <BugfixCreateModal
+          activeWf={activeWf}
+          alleInstanzen={alleInstanzen}
+          defaultInstanzName={rows[0]?.name}
           onClose={() => setShowBugfixModal(false)}
-          onSubmit={(sgId, data) => {
-            saveZuordnungByName(sgId, activeWfId, data);
+          onSubmit={async (payload) => {
+            await createBugfix(payload);
             setShowBugfixModal(false);
           }}
         />
@@ -1086,9 +1286,7 @@ export default function WartungsfensterApp() {
 
       {showNewWfModal && (
         <NewWartungsfensterModal
-          nextNummer={String(
-            Math.max(0, ...wartungsfenster.map((w) => parseInt(w.nummer, 10) || 0)) + 1
-          ).padStart(2, "0")}
+          nextNummer={String(Math.max(0, ...wartungsfenster.map((w) => parseInt(w.nummer, 10) || 0)) + 1).padStart(2, "0")}
           onClose={() => setShowNewWfModal(false)}
           onSubmit={(data) => {
             addWartungsfenster(data);
@@ -1098,18 +1296,12 @@ export default function WartungsfensterApp() {
       )}
 
       {showDomainModal && (
-        <DomainManagerModal
-          domains={domains}
-          servergruppen={servergruppen}
-          onAdd={addDomain}
-          onRename={renameDomain}
-          onDelete={deleteDomain}
-          onClose={() => setShowDomainModal(false)}
-        />
+        <DomainManagerModal domains={domains} servergruppen={servergruppen} onAdd={addDomain} onRename={renameDomain} onDelete={deleteDomain} onClose={() => setShowDomainModal(false)} />
       )}
 
       {showBasisaenderungModal && (
         <BasisaenderungBulkModal
+          activeWf={activeWf}
           onClose={() => setShowBasisaenderungModal(false)}
           onSubmit={async (payload) => {
             await applyBasisaenderungToAll(payload);
@@ -1117,24 +1309,12 @@ export default function WartungsfensterApp() {
           }}
         />
       )}
-
-      {showArchiveModal && (
-        <ArchiveModal
-          archivedWf={archivedWf}
-          onSelect={(id) => {
-            setActiveWfId(id);
-            setShowArchiveModal(false);
-          }}
-          onDelete={deleteWartungsfenster}
-          onClose={() => setShowArchiveModal(false)}
-        />
-      )}
     </div>
   );
 }
 
 /* ---------------------------------------------------------
-   Modal: Neue Servergruppe/Instanz (Stammdaten, Mehrfachumgebung + Domäne)
+   Modal: Neue Servergruppe/Instanz (Stammdaten, Mehrfachumgebung + Domäne je Umgebung)
 --------------------------------------------------------- */
 
 function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSubmit }) {
@@ -1142,6 +1322,7 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
   const [masterDomainId, setMasterDomainId] = useState(null);
   const [domainByEnv, setDomainByEnv] = useState({});
   const [newDomainName, setNewDomainName] = useState("");
+  const [jdkAufNeuerVersion, setJdkAufNeuerVersion] = useState(false);
   const [form, setForm] = useState({
     jbossAdmin: "",
     jiraKennzeichen: "",
@@ -1200,7 +1381,7 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
     selectedEnvs.forEach((env) => {
       domainIdByUmgebung[env] = domainByEnv[env] ?? null;
     });
-    onSubmit(Array.from(selectedEnvs), { ...form, artefaktVorlagen: form.artefaktVorlagen.filter((v) => v && v.trim()), domainIdByUmgebung });
+    onSubmit(Array.from(selectedEnvs), { ...form, artefaktVorlagen: form.artefaktVorlagen.filter((v) => v && v.trim()), domainIdByUmgebung, jdkAufNeuerVersion });
   }
 
   return (
@@ -1217,22 +1398,15 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
                 Keine
               </button>
             </div>
-
             <div className="grid grid-cols-2 gap-2 mb-3">
               {ENV_GROUPS.filter((g) => !g.sub).map((g) => (
-                <label
-                  key={g.key}
-                  className={`flex items-center gap-2 text-sm rounded-md border px-3 py-2 cursor-pointer transition ${
-                    selectedEnvs.has(g.key) ? "border-[#0F4C5C]/40 bg-[#0F4C5C]/5 text-slate-700" : "border-slate-200 text-slate-600 hover:bg-slate-50"
-                  }`}
-                >
+                <label key={g.key} className={`flex items-center gap-2 text-sm rounded-md border px-3 py-2 cursor-pointer transition ${selectedEnvs.has(g.key) ? "border-[#0F4C5C]/40 bg-[#0F4C5C]/5 text-slate-700" : "border-slate-200 text-slate-600 hover:bg-slate-50"}`}>
                   <input type="checkbox" checked={selectedEnvs.has(g.key)} onChange={() => toggleEnv(g.key)} />
                   <EnvDot color={g.color} />
                   {g.label}
                 </label>
               ))}
             </div>
-
             {ENV_GROUPS.filter((g) => g.sub).map((g) => (
               <div key={g.key} className="bg-amber-50 border border-amber-100 rounded-md p-2.5">
                 <p className="text-[10px] font-semibold text-amber-700 uppercase tracking-wide mb-2 flex items-center">
@@ -1241,12 +1415,7 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
                 </p>
                 <div className="grid grid-cols-3 gap-2">
                   {g.sub.map((s) => (
-                    <label
-                      key={s.key}
-                      className={`flex items-center gap-1.5 text-xs rounded-md border px-2 py-1.5 cursor-pointer transition ${
-                        selectedEnvs.has(s.key) ? "border-amber-400 bg-white text-slate-700" : "border-amber-200/70 text-slate-600 hover:bg-white/60"
-                      }`}
-                    >
+                    <label key={s.key} className={`flex items-center gap-1.5 text-xs rounded-md border px-2 py-1.5 cursor-pointer transition ${selectedEnvs.has(s.key) ? "border-amber-400 bg-white text-slate-700" : "border-amber-200/70 text-slate-600 hover:bg-white/60"}`}>
                       <input type="checkbox" checked={selectedEnvs.has(s.key)} onChange={() => toggleEnv(s.key)} />
                       {s.label}
                     </label>
@@ -1256,11 +1425,6 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
             ))}
           </div>
           {selectedEnvs.size === 0 && <p className="text-xs text-[#DC2626] mt-1">Bitte mindestens eine Umgebung auswählen.</p>}
-          {selectedEnvs.size > 1 && (
-            <p className="text-xs text-slate-400 mt-1">
-              Wird identisch in {selectedEnvs.size} Umgebungen angelegt (Stammdaten). Domänen können je Umgebung unten abweichend gesetzt werden.
-            </p>
-          )}
         </Field>
 
         <Field label="Domäne (Vorbelegung für alle ausgewählten Umgebungen)">
@@ -1279,17 +1443,16 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
               {ALL_ENV_KEYS.filter((env) => selectedEnvs.has(env)).map((env) => (
                 <div key={env} className="flex items-center gap-2">
                   <span className="text-xs text-slate-500 w-20 shrink-0">{env}</span>
-                  <DomainSelect
-                    domains={domains}
-                    value={domainByEnv[env] ?? null}
-                    onChange={(v) => setDomainByEnv((prev) => ({ ...prev, [env]: v }))}
-                  />
+                  <DomainSelect domains={domains} value={domainByEnv[env] ?? null} onChange={(v) => setDomainByEnv((prev) => ({ ...prev, [env]: v }))} />
                 </div>
               ))}
             </div>
           </Field>
         )}
 
+        <Field label="JBossAdmin">
+          <input className={inputCls} value={form.jbossAdmin} onChange={(e) => set("jbossAdmin", e.target.value)} />
+        </Field>
         <Field label="Jira Kennzeichen">
           <input className={inputCls} value={form.jiraKennzeichen} onChange={(e) => set("jiraKennzeichen", e.target.value)} />
         </Field>
@@ -1299,6 +1462,13 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
         <Field label="Artefakt-Namensvorlage(n)">
           <ArtefaktVorlagenEditor value={form.artefaktVorlagen} onChange={(v) => set("artefaktVorlagen", v)} />
           <p className="text-xs text-slate-400 mt-1">Wird als Mouseover-Hinweis auf der Instanz-Spalte angezeigt.</p>
+        </Field>
+        <Field label="Basisänderung">
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={jdkAufNeuerVersion} onChange={(e) => setJdkAufNeuerVersion(e.target.checked)} />
+            Läuft bereits auf der neueren Java-Version
+          </label>
+          <p className="text-xs text-slate-400 mt-1">JDK-/EAP-/OJDBC-Version werden automatisch von der zuletzt erfassten Basisänderung übernommen und können danach über "Stammdaten bearbeiten" angepasst werden.</p>
         </Field>
         <Field label="Ansprechpartner">
           <input className={inputCls} value={form.ansprechpartner} onChange={(e) => set("ansprechpartner", e.target.value)} />
@@ -1324,11 +1494,12 @@ function NewServergruppeModal({ defaultEnv, domains, onAddDomain, onClose, onSub
 }
 
 /* ---------------------------------------------------------
-   Modal: Stammdaten bearbeiten
+   Modal: Stammdaten bearbeiten (inkl. Basisänderung für aktives Fenster)
 --------------------------------------------------------- */
 
-function BasisModal({ env, sg, domains, onClose, onSave }) {
+function BasisModal({ env, sg, domains, activeWf, initialBasis, onClose, onSave }) {
   const [form, setForm] = useState({ ...sg, colors: { ...sg.colors }, artefaktVorlagen: sg.artefaktVorlagen && sg.artefaktVorlagen.length > 0 ? sg.artefaktVorlagen : [""] });
+  const [basis, setBasis] = useState({ ...initialBasis });
 
   function set(key, val) {
     setForm((f) => ({ ...f, [key]: val }));
@@ -1336,13 +1507,16 @@ function BasisModal({ env, sg, domains, onClose, onSave }) {
   function setColor(key, colorKey) {
     setForm((f) => ({ ...f, colors: { ...f.colors, [key]: colorKey } }));
   }
+  function setBasisField(key, val) {
+    setBasis((b) => ({ ...b, [key]: val }));
+  }
 
   return (
     <Modal title={`Stammdaten bearbeiten — ${env} / ${sg.name || sg.jbossAdmin || sg.id}`} onClose={onClose}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          onSave({ ...form, artefaktVorlagen: form.artefaktVorlagen.filter((v) => v && v.trim()) });
+          onSave({ ...form, artefaktVorlagen: form.artefaktVorlagen.filter((v) => v && v.trim()) }, basis);
         }}
       >
         <Field label="Domäne">
@@ -1363,24 +1537,29 @@ function BasisModal({ env, sg, domains, onClose, onSave }) {
             )}
           </React.Fragment>
         ))}
-        <Field label="Basisänderung">
+
+        <Field label={`Basisänderung — gilt ab ${wfShortLabel(activeWf)}`}>
           <div className="grid grid-cols-2 gap-2 mb-2">
-            <input className={inputCls} placeholder="JDK-Version aktuell (z. B. 17.0.x)" value={form.jdkVersionAlt || ""} onChange={(e) => set("jdkVersionAlt", e.target.value)} />
-            <input className={inputCls} placeholder="JDK-Version neu (z. B. 21.0.x)" value={form.jdkVersionNeu || ""} onChange={(e) => set("jdkVersionNeu", e.target.value)} />
+            <input className={inputCls} placeholder="JDK-Version aktuell (z. B. 17.0.x)" value={basis.jdkVersionAlt || ""} onChange={(e) => setBasisField("jdkVersionAlt", e.target.value)} />
+            <input className={inputCls} placeholder="JDK-Version neu (z. B. 21.0.x)" value={basis.jdkVersionNeu || ""} onChange={(e) => setBasisField("jdkVersionNeu", e.target.value)} />
           </div>
           <label className="flex items-center gap-2 text-sm mb-3">
-            <input type="checkbox" checked={!!form.jdkAufNeuerVersion} onChange={(e) => set("jdkAufNeuerVersion", e.target.checked)} />
+            <input type="checkbox" checked={!!basis.jdkAufNeuerVersion} onChange={(e) => setBasisField("jdkAufNeuerVersion", e.target.checked)} />
             Läuft bereits auf der neueren Java-Version
           </label>
           <div className="grid grid-cols-2 gap-2 mb-2">
-            <input className={inputCls} placeholder="EAP-Version (z. B. 8.1.x)" value={form.eapVersion || ""} onChange={(e) => set("eapVersion", e.target.value)} />
-            <input className={inputCls} placeholder="OJDBC-Version (z. B. 19.xx)" value={form.ojdbcVersion || ""} onChange={(e) => set("ojdbcVersion", e.target.value)} />
+            <input className={inputCls} placeholder="EAP-Version (z. B. 8.1.x)" value={basis.eapVersion || ""} onChange={(e) => setBasisField("eapVersion", e.target.value)} />
+            <input className={inputCls} placeholder="OJDBC-Version (z. B. 19.xx)" value={basis.ojdbcVersion || ""} onChange={(e) => setBasisField("ojdbcVersion", e.target.value)} />
           </div>
           <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={!!form.basisaenderungEingespielt} onChange={(e) => set("basisaenderungEingespielt", e.target.checked)} />
+            <input type="checkbox" checked={!!basis.eingespielt} onChange={(e) => setBasisField("eingespielt", e.target.checked)} />
             Eingespielt (Spalte wird grün markiert)
           </label>
+          {basis.effectiveFromWf && !basis.explicitHere && (
+            <p className="text-xs text-slate-400 mt-1">Übernommen aus {wfShortLabel(basis.effectiveFromWf)}. Speichern legt einen eigenen Stand ab {wfShortLabel(activeWf)} an.</p>
+          )}
         </Field>
+
         <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
           <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
             Abbrechen
@@ -1395,63 +1574,54 @@ function BasisModal({ env, sg, domains, onClose, onSave }) {
 }
 
 /* ---------------------------------------------------------
-   Modal: Bugfix-Zuordnung bearbeiten (gilt ab dem gewählten Fenster)
+   Modal: Bugfix bearbeiten (Header gilt für alle Instanzen darunter,
+   Bemerkung/Properties/Eingespielt nur für diese Zeile)
 --------------------------------------------------------- */
 
-function ZuordnungModal({ sg, wf, initial, onClose, onSave }) {
-  const [form, setForm] = useState({
-    bugfixNr: initial.bugfixNr,
-    bemerkung: initial.bemerkung,
-    properties: initial.properties,
-    nexusLink: initial.nexusLink,
-    eingespielt: initial.eingespielt,
-    colors: { ...initial.colors },
-  });
-
-  function set(key, val) {
-    setForm((f) => ({ ...f, [key]: val }));
-  }
-  function setColor(key, colorKey) {
-    setForm((f) => ({ ...f, colors: { ...f.colors, [key]: colorKey } }));
-  }
+function BugfixEditModal({ sg, zu, activeWf, onClose, onSave }) {
+  const [bugfixNr, setBugfixNr] = useState(zu.bugfixNr);
+  const [nexusLink, setNexusLink] = useState(zu.nexusLink);
+  const [properties, setProperties] = useState(zu.properties);
+  const [bemerkung, setBemerkung] = useState(zu.bemerkung);
+  const [eingespielt, setEingespielt] = useState(zu.eingespielt);
 
   return (
-    <Modal title={`Bugfix bearbeiten — ${sg.name || sg.jbossAdmin || sg.id} · ${wfShortLabel(wf)}`} onClose={onClose}>
+    <Modal title={`Bugfix bearbeiten — ${sg.name || sg.jbossAdmin || sg.id} · ${wfShortLabel(activeWf)}`} onClose={onClose}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          onSave(form);
+          onSave({ bugfixNr, nexusLink }, { properties, bemerkung, eingespielt, colors: zu.colors });
         }}
       >
         <p className="text-xs text-slate-500 mb-4 bg-slate-50 border border-slate-200 rounded-md px-3 py-2">
-          Diese Änderung gilt ab <strong>{wfShortLabel(wf)}</strong> ({wf?.datum}) für alle Instanzen mit demselben Instanznamen in jeder Umgebung — und automatisch für alle
-          späteren Wartungsfenster, bis sie dort erneut geändert wird.
+          Bugfixnummer und Nexus Link gelten für <strong>alle</strong> Instanzen, die zu diesem Bugfix gehören — eine Änderung hier wirkt sich auf alle davon aus. Bemerkung,
+          Properties und Eingespielt-Status gelten nur für diese Instanz.
         </p>
-        {COLUMNS.filter((c) => c.group === "bugfix" && c.key !== "properties").map((c) => (
-          <Field key={c.key} label={c.label}>
-            <div className="flex gap-2 items-center">
-              <input className={inputCls} value={form[c.key] || ""} onChange={(e) => set(c.key, e.target.value)} />
-              <ColorPicker value={form.colors?.[c.key]} onChange={(v) => setColor(c.key, v)} />
-            </div>
-          </Field>
-        ))}
-        <Field label="Property einspielen">
+        <Field label="Bugfixnummer">
+          <input required className={inputCls} placeholder="z. B. 42" value={bugfixNr} onChange={(e) => setBugfixNr(e.target.value)} />
+        </Field>
+        <Field label="Nexus Link">
+          <input className={inputCls} value={nexusLink} onChange={(e) => setNexusLink(e.target.value)} />
+        </Field>
+        <Field label="Bemerkung (nur diese Instanz)">
+          <input className={inputCls} value={bemerkung} onChange={(e) => setBemerkung(e.target.value)} />
+        </Field>
+        <Field label="Property einspielen (nur diese Instanz)">
           <div className="flex gap-4 text-sm">
             <label className="flex items-center gap-2">
-              <input type="radio" name="props-edit" checked={form.properties === "ja"} onChange={() => set("properties", "ja")} />
+              <input type="radio" name="props-edit" checked={properties === "ja"} onChange={() => setProperties("ja")} />
               Ja
             </label>
             <label className="flex items-center gap-2">
-              <input type="radio" name="props-edit" checked={form.properties === "nein"} onChange={() => set("properties", "nein")} />
+              <input type="radio" name="props-edit" checked={properties === "nein"} onChange={() => setProperties("nein")} />
               Nein
             </label>
           </div>
-          {form.properties === "ja" && <p className="text-xs text-[#DC2626] mt-1">Spalte "Properties" wird rot markiert.</p>}
         </Field>
         <Field label="Status">
           <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={form.eingespielt} onChange={(e) => set("eingespielt", e.target.checked)} />
-            Bereits eingespielt (Zeile wird grün markiert)
+            <input type="checkbox" checked={eingespielt} onChange={(e) => setEingespielt(e.target.checked)} />
+            Eingespielt (Zeile wird grün markiert)
           </label>
         </Field>
         <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
@@ -1468,82 +1638,161 @@ function ZuordnungModal({ sg, wf, initial, onClose, onSave }) {
 }
 
 /* ---------------------------------------------------------
-   Modal: Bugfix erfassen (Servergruppe per Dropdown wählen)
+   Modal: Bugfix erfassen (1-n Instanzen auf einmal auswählbar)
 --------------------------------------------------------- */
 
-function BugfixQuickModal({ defaultEnv, servergruppen, wf, onClose, onSubmit }) {
-  const [env, setEnv] = useState(defaultEnv);
-  const [sgId, setSgId] = useState(servergruppen[defaultEnv]?.[0]?.id || "");
-  const [form, setForm] = useState({ bugfixNr: "", bemerkung: "", properties: "nein", nexusLink: "" });
+function BugfixCreateModal({ activeWf, alleInstanzen, onClose, onSubmit }) {
+  const [bugfixNr, setBugfixNr] = useState("");
+  const [nexusLink, setNexusLink] = useState("");
+  const [bemerkung, setBemerkung] = useState("");
+  const [properties, setProperties] = useState("nein");
+  const [ausgewaehlt, setAusgewaehlt] = useState(new Set());
+  const [submitting, setSubmitting] = useState(false);
 
-  const options = servergruppen[env] || [];
-
-  function set(key, val) {
-    setForm((f) => ({ ...f, [key]: val }));
+  function toggleInstanz(name) {
+    setAusgewaehlt((prev) => {
+      const next = new Set(prev);
+      next.has(name) ? next.delete(name) : next.add(name);
+      return next;
+    });
   }
-  function handleSubmit(e) {
+
+  async function handleSubmit(e) {
     e.preventDefault();
-    if (!sgId) return;
-    onSubmit(sgId, { ...form, eingespielt: false, colors: {} });
+    if (ausgewaehlt.size === 0) return;
+    setSubmitting(true);
+    await onSubmit({ bugfixNr, nexusLink, bemerkung, properties, instanzNamen: Array.from(ausgewaehlt) });
+    setSubmitting(false);
   }
 
   return (
-    <Modal title={`Bugfix erfassen — ${wfShortLabel(wf)}`} onClose={onClose}>
+    <Modal title={`Bugfix erfassen — ${wfShortLabel(activeWf)}`} onClose={onClose}>
       <form onSubmit={handleSubmit}>
-        <Field label="Umgebung">
-          <EnvSelect
-            value={env}
-            onChange={(v) => {
-              setEnv(v);
-              setSgId(servergruppen[v]?.[0]?.id || "");
-            }}
-          />
-        </Field>
-        <Field label="Servergruppe/Instanz">
-          <select value={sgId} onChange={(e) => setSgId(e.target.value)} className={inputCls}>
-            {options.map((sg) => (
-              <option key={sg.id} value={sg.id}>
-                {sg.name || sg.jbossAdmin || sg.id}
-                {sg.name && sg.jbossAdmin ? ` — ${sg.jbossAdmin}` : ""}
-              </option>
+        <Field label="Betroffene Instanzen (1-n)">
+          <div className="border border-slate-200 rounded-md p-3 max-h-48 overflow-y-auto space-y-1">
+            {alleInstanzen.length === 0 && <p className="text-sm text-slate-400">Noch keine Instanzen angelegt.</p>}
+            {alleInstanzen.map((i) => (
+              <label key={i.id} className="flex items-center gap-2 text-sm text-slate-600">
+                <input type="checkbox" checked={ausgewaehlt.has(i.name)} onChange={() => toggleInstanz(i.name)} />
+                {i.name}
+              </label>
             ))}
-            {options.length === 0 && <option value="">Keine Servergruppen in dieser Umgebung</option>}
-          </select>
+          </div>
+          {ausgewaehlt.size === 0 && <p className="text-xs text-[#DC2626] mt-1">Bitte mindestens eine Instanz auswählen.</p>}
+          <p className="text-xs text-slate-400 mt-1">Gilt jeweils automatisch in jeder Umgebung, in der die gewählte Instanz vorkommt.</p>
         </Field>
         <Field label="Bugfixnummer">
-          <input required className={inputCls} placeholder="z. B. 42" value={form.bugfixNr} onChange={(e) => set("bugfixNr", e.target.value)} />
+          <input required className={inputCls} placeholder="z. B. 42" value={bugfixNr} onChange={(e) => setBugfixNr(e.target.value)} />
         </Field>
         <Field label="Nexus Link">
-          <input className={inputCls} placeholder="https://nexus.internal/repo/..." value={form.nexusLink} onChange={(e) => set("nexusLink", e.target.value)} />
+          <input className={inputCls} placeholder="https://nexus.internal/repo/..." value={nexusLink} onChange={(e) => setNexusLink(e.target.value)} />
         </Field>
         <Field label="Bemerkung">
-          <input className={inputCls} value={form.bemerkung} onChange={(e) => set("bemerkung", e.target.value)} />
+          <input className={inputCls} value={bemerkung} onChange={(e) => setBemerkung(e.target.value)} />
         </Field>
         <Field label="Property einspielen">
           <div className="flex gap-4 text-sm">
             <label className="flex items-center gap-2">
-              <input type="radio" name="props-quick" checked={form.properties === "ja"} onChange={() => set("properties", "ja")} />
+              <input type="radio" name="props-quick" checked={properties === "ja"} onChange={() => setProperties("ja")} />
               Ja
             </label>
             <label className="flex items-center gap-2">
-              <input type="radio" name="props-quick" checked={form.properties === "nein"} onChange={() => set("properties", "nein")} />
+              <input type="radio" name="props-quick" checked={properties === "nein"} onChange={() => setProperties("nein")} />
               Nein
             </label>
           </div>
-          {form.properties === "ja" && <p className="text-xs text-[#DC2626] mt-1">Die Spalte "Properties" wird rot markiert.</p>}
+          {properties === "ja" && <p className="text-xs text-[#DC2626] mt-1">Die Spalte "Properties" wird rot markiert.</p>}
         </Field>
-        <p className="text-xs text-slate-400 mb-3">
-          Gilt für alle Instanzen mit diesem Instanznamen (in jeder Umgebung), ab dem aktuell gewählten Wartungsfenster und automatisch für alle folgenden.
-        </p>
+        <p className="text-xs text-slate-400 mb-3">Gilt ausschließlich für {wfShortLabel(activeWf)} — keine automatische Übernahme in andere Wartungsfenster.</p>
         <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
           <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
             Abbrechen
           </button>
-          <button type="submit" className="px-4 py-2 text-sm bg-[#0F4C5C] text-white rounded-md hover:brightness-110">
-            Bugfix speichern
+          <button type="submit" disabled={submitting || ausgewaehlt.size === 0} className="px-4 py-2 text-sm bg-[#0F4C5C] text-white rounded-md hover:brightness-110 disabled:opacity-50">
+            {submitting ? "Wird gespeichert…" : "Bugfix speichern"}
           </button>
         </div>
       </form>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------
+   Modal: Bugfix in ein anderes Wartungsfenster übertragen (auch rückwärts)
+--------------------------------------------------------- */
+
+function TransferModal({ sg, activeWf, sortedWf, onTransfer, onClose }) {
+  const auswahl = sortedWf.filter((w) => w.id !== activeWf?.id);
+  const [zielWfId, setZielWfId] = useState(auswahl[0]?.id ?? "");
+
+  return (
+    <Modal title={`Bugfix übertragen — ${sg.name || sg.jbossAdmin || sg.id}`} onClose={onClose}>
+      <p className="text-xs text-slate-500 mb-4 bg-slate-50 border border-slate-200 rounded-md px-3 py-2">
+        Verschiebt den kompletten Bugfix (mit <strong>allen</strong> zugehörigen Instanzen) von <strong>{wfShortLabel(activeWf)}</strong> in das gewählte Wartungsfenster — auch ein
+        früheres ist möglich.
+      </p>
+      <Field label="Ziel-Wartungsfenster">
+        <select className={inputCls} value={zielWfId} onChange={(e) => setZielWfId(Number(e.target.value))}>
+          {auswahl.map((w) => (
+            <option key={w.id} value={w.id}>
+              {wfFullLabel(w)}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 mt-2">
+        <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
+          Abbrechen
+        </button>
+        <button type="button" onClick={() => zielWfId && onTransfer(zielWfId)} disabled={!zielWfId} className="px-4 py-2 text-sm bg-[#0F4C5C] text-white rounded-md hover:brightness-110 disabled:opacity-50">
+          Übertragen
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------
+   Modal: Bugfix löschen (nur diese Instanz oder komplett)
+--------------------------------------------------------- */
+
+function DeleteBugfixModal({ sg, zu, onDeleteRow, onDeleteAll, onClose }) {
+  const [busy, setBusy] = useState(false);
+  async function run(fn) {
+    setBusy(true);
+    try {
+      await fn();
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Modal title={`Bugfix löschen — ${formatBf(zu.bugfixNr)}`} onClose={onClose}>
+      <p className="text-sm text-slate-600 mb-4">
+        Dieser Bugfix betrifft eventuell noch weitere Instanzen. Möchten Sie ihn nur bei <strong>{sg.name || sg.jbossAdmin || sg.id}</strong> entfernen, oder komplett löschen (bei
+        allen betroffenen Instanzen)?
+      </p>
+      <div className="flex flex-col gap-2">
+        <button
+          disabled={busy}
+          onClick={() => run(onDeleteRow)}
+          className="px-4 py-2 text-sm border border-slate-300 rounded-md hover:bg-slate-50 text-left disabled:opacity-50"
+        >
+          Nur bei dieser Instanz entfernen
+        </button>
+        <button
+          disabled={busy}
+          onClick={() => run(onDeleteAll)}
+          className="px-4 py-2 text-sm border border-[#DC2626]/40 text-[#DC2626] rounded-md hover:bg-red-50 text-left disabled:opacity-50"
+        >
+          Kompletten Bugfix löschen (alle Instanzen)
+        </button>
+      </div>
+      <div className="flex justify-end pt-4 mt-2 border-t border-slate-100">
+        <button onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
+          Abbrechen
+        </button>
+      </div>
     </Modal>
   );
 }
@@ -1634,7 +1883,6 @@ function DomainManagerModal({ domains, servergruppen, onAdd, onRename, onDelete,
           <Plus size={14} /> Anlegen
         </button>
       </form>
-
       <div className="border border-slate-200 rounded-md divide-y divide-slate-100">
         {domains.length === 0 && <p className="text-sm text-slate-400 px-3 py-4 text-center">Noch keine Domänen angelegt.</p>}
         {domains.map((d) => (
@@ -1663,7 +1911,6 @@ function DomainManagerModal({ domains, servergruppen, onAdd, onRename, onDelete,
           </div>
         ))}
       </div>
-
       <div className="flex justify-end pt-4">
         <button onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
           Schließen
@@ -1674,10 +1921,10 @@ function DomainManagerModal({ domains, servergruppen, onAdd, onRename, onDelete,
 }
 
 /* ---------------------------------------------------------
-   Modal: Basisänderung erfassen (wird auf alle Instanzen angewendet)
+   Modal: Basisänderung erfassen (auf alle Instanzen im aktiven Fenster)
 --------------------------------------------------------- */
 
-function BasisaenderungBulkModal({ onClose, onSubmit }) {
+function BasisaenderungBulkModal({ activeWf, onClose, onSubmit }) {
   const [jdkVersionAlt, setJdkVersionAlt] = useState("");
   const [jdkVersionNeu, setJdkVersionNeu] = useState("");
   const [eapVersion, setEapVersion] = useState("");
@@ -1692,20 +1939,18 @@ function BasisaenderungBulkModal({ onClose, onSubmit }) {
   }
 
   return (
-    <Modal title="Basisänderung erfassen" onClose={onClose}>
+    <Modal title={`Basisänderung erfassen — ${wfShortLabel(activeWf)}`} onClose={onClose}>
       <form onSubmit={handleSubmit}>
         <p className="text-xs text-slate-500 mb-4 bg-slate-50 border border-slate-200 rounded-md px-3 py-2">
-          Wird auf <strong>alle</strong> Instanzen in allen Umgebungen angewendet. Der "Eingespielt"-Status wird dabei für alle zurückgesetzt. Alle Felder sind optional. Einzelne
-          Instanzen lassen sich danach über "Stammdaten bearbeiten" individuell abweichend anpassen oder als eingespielt markieren.
+          Wird auf <strong>alle</strong> Instanzen in allen Umgebungen angewendet, gültig ab {wfShortLabel(activeWf)} (gilt automatisch auch für spätere Fenster, bis dort erneut
+          geändert). Der "Eingespielt"-Status wird dabei für alle zurückgesetzt. Alle Felder sind optional.
         </p>
         <Field label="JDK-Version aktuell">
           <input className={inputCls} placeholder="z. B. 17.0.x" value={jdkVersionAlt} onChange={(e) => setJdkVersionAlt(e.target.value)} />
         </Field>
         <Field label="JDK-Version neu">
           <input className={inputCls} placeholder="z. B. 21.0.x" value={jdkVersionNeu} onChange={(e) => setJdkVersionNeu(e.target.value)} />
-          <p className="text-xs text-slate-400 mt-1">
-            Bei jeder Instanz lässt sich später einzeln angeben, ob sie schon auf der neueren oder noch auf der aktuellen Version läuft — die passende Version wird dann automatisch übernommen.
-          </p>
+          <p className="text-xs text-slate-400 mt-1">Bei jeder Instanz lässt sich einzeln angeben, ob sie schon auf der neueren oder noch auf der aktuellen Version läuft.</p>
         </Field>
         <Field label="EAP-Version">
           <input className={inputCls} placeholder="z. B. 8.1.x" value={eapVersion} onChange={(e) => setEapVersion(e.target.value)} />
@@ -1727,20 +1972,14 @@ function BasisaenderungBulkModal({ onClose, onSubmit }) {
 }
 
 /* ---------------------------------------------------------
-   Modal: Verlauf (fortgeschriebene Werte je Wartungsfenster)
---------------------------------------------------------- */
-
-/* ---------------------------------------------------------
-   Modal: Wartungsfenster-Archiv (ältere Fenster, nicht mehr im Standard-Dropdown)
+   Modal: Wartungsfenster-Archiv
 --------------------------------------------------------- */
 
 function ArchiveModal({ archivedWf, onSelect, onDelete, onClose }) {
   const rows = [...archivedWf].sort((a, b) => b.datum.localeCompare(a.datum));
   return (
     <Modal title="Wartungsfenster-Archiv" onClose={onClose}>
-      <p className="text-xs text-slate-500 mb-4">
-        Diese Wartungsfenster liegen weiter als die letzten 2 vergangenen zurück und werden im normalen Auswahlfeld nicht mehr angezeigt. Zum Ansehen einfach anklicken.
-      </p>
+      <p className="text-xs text-slate-500 mb-4">Diese Wartungsfenster liegen weiter als die letzten 2 vergangenen zurück und werden im normalen Auswahlfeld nicht mehr angezeigt.</p>
       <div className="border border-slate-200 rounded-md divide-y divide-slate-100">
         {rows.map((wf) => (
           <div key={wf.id} className="flex items-center justify-between px-3 py-2 hover:bg-slate-50 transition">
@@ -1765,9 +2004,26 @@ function ArchiveModal({ archivedWf, onSelect, onDelete, onClose }) {
   );
 }
 
-function HistoryModal({ sg, sortedWf, getEffectiveZuordnung, onClose }) {
-  const rows = [...sortedWf].reverse();
-  const hasAny = rows.some((wf) => getEffectiveZuordnung(sg.id, wf.id).effectiveFromWf);
+/* ---------------------------------------------------------
+   Modal: Verlauf einer Instanz (alle Bugfixe über alle Wartungsfenster)
+--------------------------------------------------------- */
+
+function HistoryModal({ sg, sortedWf, bugfixe, onClose }) {
+  const rows = [...sortedWf]
+    .reverse()
+    .map((wf) => {
+      let treffer = null;
+      for (const bf of bugfixe) {
+        if (bf.wartungsfensterId !== wf.id) continue;
+        const bi = bf.instanzen.find((i) => i.instanzId === sg.instanzId);
+        if (bi) {
+          treffer = { bugfixNr: bf.bugfixNr, nexusLink: bf.nexusLink, properties: bi.properties, bemerkung: bi.bemerkung, eingespielt: bi.eingespielt };
+          break;
+        }
+      }
+      return { wf, treffer };
+    });
+  const hasAny = rows.some((r) => r.treffer);
 
   return (
     <Modal title={`Verlauf — ${sg.name || sg.jbossAdmin || sg.id}`} onClose={onClose} wide>
@@ -1776,8 +2032,6 @@ function HistoryModal({ sg, sortedWf, getEffectiveZuordnung, onClose }) {
           <tr className="text-left text-slate-500 border-b border-slate-200">
             <th className="py-2 pr-3">Wartungsfenster</th>
             <th className="py-2 pr-3">Datum</th>
-            <th className="py-2 pr-3">KW</th>
-            <th className="py-2 pr-3">ATLAS Release</th>
             <th className="py-2 pr-3">Bugfix Nr</th>
             <th className="py-2 pr-3">Properties</th>
             <th className="py-2 pr-3">Nexus Link</th>
@@ -1786,42 +2040,113 @@ function HistoryModal({ sg, sortedWf, getEffectiveZuordnung, onClose }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((wf) => {
-            const zu = getEffectiveZuordnung(sg.id, wf.id);
-            return (
-              <tr key={wf.id} className="border-b border-slate-100">
-                <td className="py-2 pr-3 font-medium text-slate-700">{wfShortLabel(wf)}</td>
-                <td className="py-2 pr-3 font-mono">{wf.datum}</td>
-                <td className="py-2 pr-3 font-mono">{wf.kw}</td>
-                <td className="py-2 pr-3">{wf.atlasRelease}</td>
-                <td className="py-2 pr-3 font-mono">{zu.bugfixNr || <span className="text-slate-300">—</span>}</td>
-                <td className="py-2 pr-3">
-                  {zu.effectiveFromWf ? (
-                    <span className={`px-2 py-0.5 rounded text-[11px] font-semibold ${zu.properties === "ja" ? "bg-[#DC2626] text-white" : "bg-slate-100 text-slate-500"}`}>
-                      {zu.properties === "ja" ? "JA" : "NEIN"}
-                    </span>
-                  ) : (
-                    <span className="text-slate-300">—</span>
-                  )}
-                </td>
-                <td className="py-2 pr-3 font-mono truncate max-w-[160px]">{zu.nexusLink || <span className="text-slate-300">—</span>}</td>
-                <td className="py-2 pr-3">{zu.bemerkung || <span className="text-slate-300">—</span>}</td>
-                <td className="py-2 pr-3 text-[11px]">
-                  {!zu.effectiveFromWf ? (
-                    <span className="text-slate-300">—</span>
-                  ) : (
-                    <>
-                      {zu.eingespielt && <span className="text-green-600 font-medium mr-1">eingespielt</span>}
-                      {zu.explicitHere ? <span className="text-slate-600">geändert</span> : <span className="text-slate-400">übernommen seit {wfShortLabel(zu.effectiveFromWf)}</span>}
-                    </>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
+          {rows.map(({ wf, treffer }) => (
+            <tr key={wf.id} className="border-b border-slate-100">
+              <td className="py-2 pr-3 font-medium text-slate-700">{wfShortLabel(wf)}</td>
+              <td className="py-2 pr-3 font-mono">{wf.datum}</td>
+              <td className="py-2 pr-3 font-mono">{formatBf(treffer?.bugfixNr) || <span className="text-slate-300">—</span>}</td>
+              <td className="py-2 pr-3">
+                {treffer ? (
+                  <span className={`px-2 py-0.5 rounded text-[11px] font-semibold ${treffer.properties === "ja" ? "bg-[#DC2626] text-white" : "bg-slate-100 text-slate-500"}`}>
+                    {treffer.properties === "ja" ? "JA" : "NEIN"}
+                  </span>
+                ) : (
+                  <span className="text-slate-300">—</span>
+                )}
+              </td>
+              <td className="py-2 pr-3 font-mono truncate max-w-[160px]">{treffer?.nexusLink || <span className="text-slate-300">—</span>}</td>
+              <td className="py-2 pr-3">{treffer?.bemerkung || <span className="text-slate-300">—</span>}</td>
+              <td className="py-2 pr-3 text-[11px]">{treffer?.eingespielt ? <span className="text-green-600 font-medium">eingespielt</span> : treffer ? <span className="text-slate-400">nicht eingespielt</span> : <span className="text-slate-300">—</span>}</td>
+            </tr>
+          ))}
         </tbody>
       </table>
-      {!hasAny && <p className="text-center text-slate-400 py-6 text-sm">Für diese Servergruppe/Instanz wurde bisher kein Bugfix erfasst.</p>}
+      {!hasAny && <p className="text-center text-slate-400 py-6 text-sm">Für diese Instanz wurde bisher in keinem Wartungsfenster ein Bugfix erfasst.</p>}
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------
+   Modal: Konsolidiertes "Eingespielt" - Basissystem, Bugfix oder beides
+--------------------------------------------------------- */
+
+function EingespieltModal({ hasBugfix, hasBasis, onChoose, onClose }) {
+  return (
+    <Modal title="Was wurde eingespielt?" onClose={onClose}>
+      <p className="text-sm text-slate-600 mb-4">Bitte auswählen, was tatsächlich eingespielt wurde.</p>
+      <div className="flex flex-col gap-2">
+        <button
+          disabled={!hasBasis}
+          onClick={() => onChoose("basis")}
+          className="px-4 py-2 text-sm border border-slate-300 rounded-md hover:bg-slate-50 text-left disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Nur Basissystem
+        </button>
+        <button
+          disabled={!hasBugfix}
+          onClick={() => onChoose("bugfix")}
+          className="px-4 py-2 text-sm border border-slate-300 rounded-md hover:bg-slate-50 text-left disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Nur Bugfix
+        </button>
+        <button
+          disabled={!hasBugfix || !hasBasis}
+          onClick={() => onChoose("beides")}
+          className="px-4 py-2 text-sm border border-[#0F4C5C]/40 text-[#0F4C5C] rounded-md hover:bg-[#0F4C5C]/5 text-left disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Beides
+        </button>
+      </div>
+      <div className="flex justify-end pt-4 mt-2 border-t border-slate-100">
+        <button onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
+          Abbrechen
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------
+   Modal: Instanzen verwalten - eine Instanz komplett (alle Umgebungen
+   auf einmal) löschen
+--------------------------------------------------------- */
+
+function InstanzManagerModal({ servergruppen, onDeleteEverywhere, onClose }) {
+  const map = new Map();
+  Object.entries(servergruppen).forEach(([env, rows]) => {
+    rows.forEach((sg) => {
+      if (!map.has(sg.name)) map.set(sg.name, []);
+      map.get(sg.name).push(env);
+    });
+  });
+  const list = Array.from(map.entries())
+    .map(([name, envs]) => ({ name, envs }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  return (
+    <Modal title="Instanzen verwalten" onClose={onClose} wide>
+      <p className="text-xs text-slate-500 mb-4">
+        Zeigt jede Instanz mit den Umgebungen, in denen sie vorkommt. "Überall löschen" entfernt die Instanz aus <strong>allen</strong> Umgebungen auf einmal. Um nur eine einzelne
+        Umgebung zu entfernen, den Lösch-Button direkt in der Tabellenzeile nutzen.
+      </p>
+      <div className="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-96 overflow-y-auto">
+        {list.length === 0 && <p className="text-sm text-slate-400 px-3 py-4 text-center">Noch keine Instanzen angelegt.</p>}
+        {list.map((item) => (
+          <div key={item.name} className="flex items-center justify-between px-3 py-2">
+            <span className="text-sm text-slate-700">
+              {item.name} <span className="text-slate-400 text-xs">({item.envs.length} Umgebung{item.envs.length !== 1 ? "en" : ""}: {item.envs.join(", ")})</span>
+            </span>
+            <button onClick={() => onDeleteEverywhere(item.name)} className="text-slate-400 hover:text-[#DC2626] shrink-0 ml-2" title="Überall löschen">
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="flex justify-end pt-4">
+        <button onClick={onClose} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">
+          Schließen
+        </button>
+      </div>
     </Modal>
   );
 }

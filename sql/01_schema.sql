@@ -53,12 +53,6 @@ CREATE TABLE servergruppe (
   ansprechpartner     VARCHAR(120) NOT NULL DEFAULT '',
   aufrufadresse       VARCHAR(255) NOT NULL DEFAULT '',
   soa_endpunkte       VARCHAR(255) NOT NULL DEFAULT '',
-  jdk_version_alt     VARCHAR(30)  NOT NULL DEFAULT '',
-  jdk_version_neu     VARCHAR(30)  NOT NULL DEFAULT '',
-  jdk_auf_neuer_version TINYINT(1) NOT NULL DEFAULT 0,
-  eap_version         VARCHAR(30)  NOT NULL DEFAULT '',
-  ojdbc_version       VARCHAR(30)  NOT NULL DEFAULT '',
-  basisaenderung_eingespielt TINYINT(1) NOT NULL DEFAULT 0,
   farben              JSON         NULL,          -- z. B. {"aufrufadresse":"yellow"}
   erstellt_am         TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
   aktualisiert_am     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -104,30 +98,66 @@ CREATE TABLE wartungsfenster (
 CREATE INDEX idx_wartungsfenster_datum ON wartungsfenster(datum);
 
 -- ------------------------------------------------------------
--- Bugfix-Zuordnung: EIN Eintrag pro Instanz + Wartungsfenster.
--- Es werden nur EXPLIZITE Änderungen gespeichert - die
--- "Fortschreibung" (ein Bugfix gilt automatisch auch für alle
--- späteren Wartungsfenster, bis er dort erneut geändert wird)
--- wird zur Laufzeit über die View v_bugfix_effektiv berechnet
--- (siehe 05_views.sql), nicht redundant abgespeichert.
+-- Bugfix: gehört zu GENAU EINEM Wartungsfenster (keine Fortschreibung
+-- in andere Fenster - jedes Fenster ist unabhängig).
 -- ------------------------------------------------------------
-CREATE TABLE bugfix_zuordnung (
+CREATE TABLE bugfix (
   id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  instanz_id          BIGINT UNSIGNED NOT NULL,
   wartungsfenster_id  BIGINT UNSIGNED NOT NULL,
   bugfix_nr           VARCHAR(30)  NOT NULL DEFAULT '',
-  properties          VARCHAR(10)  NOT NULL DEFAULT 'nein',
   nexus_link          VARCHAR(255) NOT NULL DEFAULT '',
-  bemerkung           VARCHAR(500) NOT NULL DEFAULT '',
+  erstellt_am         TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  CONSTRAINT fk_bugfix_wartungsfenster
+    FOREIGN KEY (wartungsfenster_id) REFERENCES wartungsfenster(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- ------------------------------------------------------------
+-- Zuordnung: ein Bugfix kann mehrere Instanzen betreffen (1-n), jede
+-- mit eigenem Properties/Bemerkung/Eingespielt-Status. Gilt dadurch
+-- automatisch in allen Umgebungen, in denen die Instanz vorkommt.
+-- Einzeln (diese Zeile) oder komplett (der ganze Bugfix) löschbar.
+-- ------------------------------------------------------------
+CREATE TABLE bugfix_instanz (
+  id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  bugfix_id       BIGINT UNSIGNED NOT NULL,
+  instanz_id      BIGINT UNSIGNED NOT NULL,
+  properties      VARCHAR(10)  NOT NULL DEFAULT 'nein',
+  bemerkung       VARCHAR(500) NOT NULL DEFAULT '',
+  eingespielt     TINYINT(1)   NOT NULL DEFAULT 0,
+  farben          JSON         NULL,
+
+  CONSTRAINT fk_bugfix_instanz_bugfix
+    FOREIGN KEY (bugfix_id) REFERENCES bugfix(id) ON DELETE CASCADE,
+  CONSTRAINT fk_bugfix_instanz_instanz
+    FOREIGN KEY (instanz_id) REFERENCES instanz(id) ON DELETE CASCADE,
+
+  UNIQUE KEY uq_bugfix_instanz (bugfix_id, instanz_id)
+) ENGINE=InnoDB;
+
+-- ------------------------------------------------------------
+-- Basisänderung (JDK/EAP/OJDBC): EIN Eintrag pro Servergruppe UND
+-- Wartungsfenster (im Unterschied zu bugfix_zuordnung an der
+-- Servergruppe statt an der Instanz, da diese Werte je Umgebung
+-- unterschiedlich sein können).
+-- ------------------------------------------------------------
+CREATE TABLE basisaenderung (
+  id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  servergruppe_id     BIGINT UNSIGNED NOT NULL,
+  wartungsfenster_id  BIGINT UNSIGNED NOT NULL,
+  jdk_version_alt     VARCHAR(30)  NOT NULL DEFAULT '',
+  jdk_version_neu     VARCHAR(30)  NOT NULL DEFAULT '',
+  jdk_auf_neuer_version TINYINT(1) NOT NULL DEFAULT 0,
+  eap_version         VARCHAR(30)  NOT NULL DEFAULT '',
+  ojdbc_version       VARCHAR(30)  NOT NULL DEFAULT '',
   eingespielt         TINYINT(1)   NOT NULL DEFAULT 0,
-  farben              JSON         NULL,
   erstellt_am         TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
   aktualisiert_am     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
-  CONSTRAINT fk_zuordnung_instanz
-    FOREIGN KEY (instanz_id) REFERENCES instanz(id) ON DELETE CASCADE,
-  CONSTRAINT fk_zuordnung_wartungsfenster
+  CONSTRAINT fk_basisaenderung_servergruppe
+    FOREIGN KEY (servergruppe_id) REFERENCES servergruppe(id) ON DELETE CASCADE,
+  CONSTRAINT fk_basisaenderung_wartungsfenster
     FOREIGN KEY (wartungsfenster_id) REFERENCES wartungsfenster(id) ON DELETE CASCADE,
 
-  UNIQUE KEY uq_instanz_fenster (instanz_id, wartungsfenster_id)
+  UNIQUE KEY uq_basisaenderung_sg_fenster (servergruppe_id, wartungsfenster_id)
 ) ENGINE=InnoDB;
